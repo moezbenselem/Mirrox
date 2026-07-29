@@ -1,0 +1,80 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# Electron / electron-builder
+apps/desktop/dist/
+apps/desktop/out/
+apps/desktop/release/
+*.dmg
+*.blockmap
+*.app
+*.zip
+*.AppImage
+*.deb
+*.rpm
+*.exe
+*.msi
+*.snap
+
+# Vendored native binaries (regenerate with npm run vendor)
+vendor/bin/
+vendor/bin-arm64/
+vendor/bin-x64/
+vendor/staging-x64/
+!vendor/.gitkeep
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+credentials*.json
+service-account*.json
+
+# Logs & caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.cache/
+.turbo/
+.eslintcache
+.vite/
+coverage/
+tmp/
+temp/
+*.tmp
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# Cursor local state (keep shared rules if added later)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+
+# Test / debug dumps
+*.heapsnapshot
+chrome-debug-profile/
