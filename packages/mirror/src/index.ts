@@ -6,6 +6,9 @@ import { prepareMacMirrorApp } from "./macAppBundle";
 
 export type QualityPreset = "low" | "medium" | "high";
 
+export type VideoSource = "display" | "camera";
+export type CameraFacing = "front" | "back";
+
 export interface MirrorOptions {
   serial: string;
   scrcpyPath?: string;
@@ -19,6 +22,11 @@ export interface MirrorOptions {
   windowTitle?: string;
   fullscreen?: boolean;
   audio?: boolean;
+  /** Default true — pass false to disable scrcpy clipboard autosync */
+  clipboardAutosync?: boolean;
+  videoSource?: VideoSource;
+  cameraFacing?: CameraFacing;
+  cameraId?: string;
   /** Directory containing scrcpy.png (and optionally disconnected.png) */
   iconDir?: string;
   /** macOS .icns used for the transient dock .app wrapper */
@@ -85,6 +93,10 @@ export class MirrorSession extends EventEmitter {
     return this.options.audio !== false;
   }
 
+  get videoSource(): VideoSource {
+    return this.options.videoSource ?? "display";
+  }
+
   start(): void {
     if (this.running) return;
 
@@ -94,6 +106,8 @@ export class MirrorSession extends EventEmitter {
     const bitRate = this.options.bitRate ?? preset.bitRate;
     const scrcpyPath = this.options.scrcpyPath ?? resolveDefaultScrcpy();
     const audio = this.options.audio !== false;
+    const clipboardAutosync = this.options.clipboardAutosync !== false;
+    const videoSource = this.options.videoSource ?? "display";
 
     const args = [
       "--serial",
@@ -115,6 +129,21 @@ export class MirrorSession extends EventEmitter {
     if (this.options.alwaysOnTop) args.push("--always-on-top");
     if (this.options.fullscreen) args.push("--fullscreen");
     if (!audio) args.push("--no-audio");
+    if (!clipboardAutosync) args.push("--no-clipboard-autosync");
+
+    if (videoSource === "camera") {
+      args.push("--video-source=camera");
+      if (this.options.cameraFacing) {
+        args.push(`--camera-facing=${this.options.cameraFacing}`);
+      }
+      if (this.options.cameraId) {
+        args.push(`--camera-id=${this.options.cameraId}`);
+      }
+      // Prefer device mic for camera preview; avoid echoing display audio.
+      if (audio) {
+        args.push("--audio-source=mic");
+      }
+    }
 
     const env = { ...process.env };
     if (this.options.adbPath) {

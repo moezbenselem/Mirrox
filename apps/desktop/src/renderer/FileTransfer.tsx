@@ -48,6 +48,10 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
   const [dropActive, setDropActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [progress, setProgress] = useState<{
+    message: string;
+    percent?: number | null;
+  } | null>(null);
   const [dialog, setDialog] = useState<
     | null
     | { type: "rename"; item: FsEntry; value: string }
@@ -58,6 +62,15 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     x: number;
     y: number;
     entry: FsEntry | null;
+  }>(null);
+  const [filePreview, setFilePreview] = useState<null | {
+    kind: "image" | "text" | "unsupported";
+    name: string;
+    remotePath: string;
+    tempPath: string;
+    size: number;
+    dataUrl?: string;
+    text?: string;
   }>(null);
 
   const load = useCallback(
@@ -84,16 +97,23 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serial]);
 
+  useEffect(() => {
+    return window.mirrox.onFsProgress((p) => {
+      if (p.done || p.canceled) {
+        setProgress(null);
+        return;
+      }
+      if (p.message) {
+        setProgress({ message: p.message, percent: p.percent });
+      }
+    });
+  }, []);
+
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return entries;
     return entries.filter((e) => e.name.toLowerCase().includes(q));
   }, [entries, filter]);
-
-  const selectedFiles = useMemo(
-    () => entries.filter((e) => selected.has(e.path) && !e.isDirectory),
-    [entries, selected]
-  );
 
   const selectedItems = useMemo(
     () => entries.filter((e) => selected.has(e.path)),
@@ -118,15 +138,26 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     setBusy(true);
     try {
       const { results } = await window.mirrox.uploadFs(serial, path, localPaths);
-      const summary = results
-        .map((r) => `${r.action}: ${r.localPath.split("/").pop()}`)
-        .join("\n");
-      onToast("ok", summary || "Uploaded");
+      const failed = results.filter((r) => r.error);
+      const ok = results.filter((r) => !r.error);
+      if (failed.length) {
+        onToast(
+          "error",
+          failed.map((r) => `${r.localPath.split("/").pop()}: ${r.error}`).join("\n")
+        );
+      }
+      if (ok.length) {
+        const summary = ok
+          .map((r) => `${r.action}: ${r.localPath.split("/").pop()}`)
+          .join("\n");
+        onToast("ok", summary || "Uploaded");
+      }
       await load(path);
     } catch (err) {
       onToast("error", String(err));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -135,8 +166,20 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     await uploadPaths(paths);
   }
 
+  async function onUploadFolder() {
+    const paths = await window.mirrox.pickUploadFolder();
+    await uploadPaths(paths);
+  }
+
   async function onDownload() {
-    await onDownloadItems(selectedFiles);
+    await onDownloadItems(selectedItems);
+  }
+
+  async function cancelTransfer() {
+    await window.mirrox.cancelTransfer();
+    setProgress(null);
+    setBusy(false);
+    onToast("info", "Transfer canceled");
   }
 
   function onNewFolder() {
@@ -173,7 +216,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
 
     const pad = 8;
     const menuW = 180;
-    const menuH = entry ? 220 : 120;
+    const menuH = entry ? 260 : 120;
     const x = Math.min(e.clientX, window.innerWidth - menuW - pad);
     const y = Math.min(e.clientY, window.innerHeight - menuH - pad);
     setMenu({ x: Math.max(pad, x), y: Math.max(pad, y), entry });
@@ -275,25 +318,73 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     }
   }
 
-  async function onDownloadItems(items: FsEntry[]) {
-    const files = items.filter((i) => !i.isDirectory);
-    if (!files.length) return;
+  async function onPreview(item?: FsEntry) {
+    const target = item ?? (selectedItems.length === 1 ? selectedItems[0] : null);
+    if (!target || target.isDirectory) return;
     setBusy(true);
     try {
-      const result = await window.mirrox.downloadFs(
-        serial,
-        files.map((f) => f.path)
-      );
-      if (result.canceled) return;
-      onToast(
-        "ok",
-        `Downloaded ${result.results.length} file(s) to ${result.destDir}`
-      );
-      if (result.destDir) void window.mirrox.openPath(result.destDir);
+      const result = await window.mirrox.previewFs(serial, target.path);
+      setFilePreview(result);
     } catch (err) {
       onToast("error", String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function closeFilePreview() {
+    if (filePreview?.tempPath) {
+      void window.mirrox.discardPreview(filePreview.tempPath);
+    }
+    setFilePreview(null);
+  }
+
+  async function openPreviewExternally() {
+    if (!filePreview?.tempPath) return;
+    await window.mirrox.openPath(filePreview.tempPath);
+  }
+
+  function formatBytes(n: number): string {
+    if (!n || n < 0) return "";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  async function onDownloadItems(items: FsEntry[]) {
+    if (!items.length) return;
+    const folders = items.filter((i) => i.isDirectory);
+    if (folders.length >= 2) {
+      const ok = window.confirm(`Download ${folders.length} folders?`);
+      if (!ok) return;
+    } else if (folders.length === 1 && items.length === 1) {
+      const ok = window.confirm(`Download folder “${folders[0].name}”?`);
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      const result = await window.mirrox.downloadFs(
+        serial,
+        items.map((f) => f.path)
+      );
+      if (result.canceled) return;
+      const failed = result.results.filter((r) => r.error);
+      const okCount = result.results.length - failed.length;
+      if (failed.length) {
+        onToast(
+          "error",
+          failed.map((r) => `${r.remotePath.split("/").pop()}: ${r.error}`).join("\n")
+        );
+      }
+      if (okCount > 0) {
+        onToast("ok", `Downloaded ${okCount} item(s) to ${result.destDir}`);
+        if (result.destDir) void window.mirrox.openPath(result.destDir);
+      }
+    } catch (err) {
+      onToast("error", String(err));
+    } finally {
+      setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -326,10 +417,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     return [menu.entry];
   }, [menu, selected, entries]);
 
-  const menuFiles = useMemo(
-    () => menuTargets.filter((e) => !e.isDirectory),
-    [menuTargets]
-  );
+  const menuDownloadable = menuTargets;
   const menuSingle = menuTargets.length === 1 ? menuTargets[0] : null;
 
   return (
@@ -341,14 +429,17 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
             Refresh
           </button>
           <button className="btn" disabled={disabled || busy} onClick={() => void onUpload()}>
-            Upload…
+            Upload files…
+          </button>
+          <button className="btn" disabled={disabled || busy} onClick={() => void onUploadFolder()}>
+            Upload folder…
           </button>
           <button
             className="btn primary"
-            disabled={disabled || busy || selectedFiles.length === 0}
+            disabled={disabled || busy || selectedItems.length === 0}
             onClick={() => void onDownload()}
           >
-            Download{selectedFiles.length ? ` (${selectedFiles.length})` : ""}
+            Download{selectedItems.length ? ` (${selectedItems.length})` : ""}
           </button>
           <button
             className="btn danger"
@@ -356,6 +447,15 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
             onClick={() => void onDelete()}
           >
             Delete{selectedItems.length ? ` (${selectedItems.length})` : ""}
+          </button>
+          <button
+            className="btn"
+            disabled={
+              disabled || busy || selectedItems.length !== 1 || Boolean(selectedItems[0]?.isDirectory)
+            }
+            onClick={() => void onPreview()}
+          >
+            Preview
           </button>
           <button
             className="btn"
@@ -373,6 +473,28 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
           </button>
         </div>
       </div>
+
+      {progress && (
+        <div className="transfer-progress">
+          <div className="transfer-progress-row">
+            <span>
+              {progress.message}
+              {progress.percent != null ? ` ${Math.round(progress.percent)}%` : ""}
+            </span>
+            <button type="button" className="btn" onClick={() => void cancelTransfer()}>
+              Cancel
+            </button>
+          </div>
+          {progress.percent != null && (
+            <div className="transfer-bar">
+              <div
+                className="transfer-bar-fill"
+                style={{ width: `${Math.min(100, Math.max(0, progress.percent))}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="file-shortcuts">
         {SHORTCUTS.map((s) => (
@@ -451,6 +573,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
                 }}
                 onDoubleClick={() => {
                   if (entry.isDirectory) void goTo(entry.path);
+                  else void onPreview(entry);
                 }}
                 onContextMenu={(e) => openContextMenu(e, entry)}
               >
@@ -464,8 +587,8 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
       </div>
 
       <p className="file-hint">
-        Double-click a folder to open. Right-click for actions. Click to select
-        (⌘/Ctrl for multi). Drop files onto the list to upload. APKs install
+        Double-click a folder to open, or a file to preview. Right-click for actions. Click to
+        select (⌘/Ctrl for multi). Drop files or folders onto the list to upload. APKs install
         automatically.
       </p>
 
@@ -496,17 +619,30 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
                     Open
                   </button>
                 )}
-                {menuFiles.length > 0 && (
+                {menuSingle && !menuSingle.isDirectory && (
                   <button
                     type="button"
                     className="fs-menu-item"
                     role="menuitem"
                     onClick={() => {
                       closeMenu();
-                      void onDownloadItems(menuFiles);
+                      void onPreview(menuSingle);
                     }}
                   >
-                    Download{menuFiles.length > 1 ? ` (${menuFiles.length})` : ""}
+                    Preview
+                  </button>
+                )}
+                {menuDownloadable.length > 0 && (
+                  <button
+                    type="button"
+                    className="fs-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      closeMenu();
+                      void onDownloadItems(menuDownloadable);
+                    }}
+                  >
+                    Download{menuDownloadable.length > 1 ? ` (${menuDownloadable.length})` : ""}
                   </button>
                 )}
                 {menuSingle && (
@@ -646,6 +782,63 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
                 onClick={() => void submitDialog()}
               >
                 {dialog.type === "delete" ? "Delete" : "OK"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {filePreview && (
+        <div className="modal-backdrop" onClick={() => void closeFilePreview()}>
+          <div
+            className="modal file-preview-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-label="File preview"
+          >
+            <div className="modal-header">
+              <div className="file-preview-title">
+                <h3>{filePreview.name}</h3>
+                {filePreview.size > 0 && (
+                  <span className="file-preview-meta">{formatBytes(filePreview.size)}</span>
+                )}
+              </div>
+              <button className="btn" onClick={() => void closeFilePreview()} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="modal-preview file-preview-body">
+              {filePreview.kind === "image" && filePreview.dataUrl && (
+                <img src={filePreview.dataUrl} alt={filePreview.name} />
+              )}
+              {filePreview.kind === "text" && (
+                <pre className="file-preview-text">{filePreview.text}</pre>
+              )}
+              {filePreview.kind === "unsupported" && (
+                <div className="file-preview-unsupported">
+                  <p>No in-app preview for this file type.</p>
+                  <p>Open it with a system app, or download it to keep a copy.</p>
+                </div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button
+                className="btn primary"
+                disabled={busy}
+                onClick={() => {
+                  void onDownloadItems([
+                    {
+                      name: filePreview.name,
+                      path: filePreview.remotePath,
+                      isDirectory: false,
+                    },
+                  ]);
+                }}
+              >
+                Download…
+              </button>
+              <button className="btn" disabled={busy} onClick={() => void openPreviewExternally()}>
+                Open externally
               </button>
             </div>
           </div>

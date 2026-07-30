@@ -18,6 +18,40 @@ export interface AdbDevice {
   usb?: string;
 }
 
+export interface DeviceStorageInfo {
+  used?: string;
+  total?: string;
+  available?: string;
+  raw?: string;
+}
+
+export interface DeviceBatteryInfo {
+  level?: number;
+  charging?: boolean;
+  status?: string;
+}
+
+export interface DeviceDetails {
+  serial: string;
+  model?: string;
+  androidVersion?: string;
+  sdk?: string;
+  battery?: DeviceBatteryInfo;
+  ip?: string | null;
+  storage?: DeviceStorageInfo;
+  connection: "Cable" | "Wireless";
+  available: boolean;
+  unavailableReason?: string;
+}
+
+export type TransferProgress = {
+  phase: "push" | "pull";
+  localPath?: string;
+  remotePath?: string;
+  percent?: number;
+  message?: string;
+};
+
 export interface AdbFsEntry {
   name: string;
   path: string;
@@ -186,8 +220,25 @@ export class AdbClient extends EventEmitter {
     return (stdout || stderr).trim();
   }
 
+  async pair(hostPort: string, code: string): Promise<string> {
+    const { stdout, stderr } = await this.run(["pair", hostPort, code]);
+    return (stdout || stderr).trim();
+  }
+
   async disconnect(hostPort?: string): Promise<void> {
     await this.run(hostPort ? ["disconnect", hostPort] : ["disconnect"]);
+  }
+
+  async keyevent(serial: string, code: number | string): Promise<void> {
+    await this.run(["shell", "input", "keyevent", String(code)], serial);
+  }
+
+  async expandNotifications(serial: string): Promise<void> {
+    try {
+      await this.shell("cmd statusbar expand-notifications", serial);
+    } catch {
+      await this.keyevent(serial, 83);
+    }
   }
 
   async getDeviceIp(serial: string): Promise<string | null> {
@@ -197,10 +248,212 @@ export class AdbClient extends EventEmitter {
         serial
       );
       const match = stdout.match(/inet\s+(\d+\.\d+\.\d+\.\d+)/);
+      if (match?.[1]) return match[1];
+    } catch {
+      /* try fallback */
+    }
+    try {
+      const { stdout } = await this.shell(
+        "ip -f inet addr show | grep -oE 'inet [0-9.]+' | grep -v '127.0.0.1' | head -1",
+        serial
+      );
+      const match = stdout.match(/inet\s+(\d+\.\d+\.\d+\.\d+)/);
       return match?.[1] ?? null;
     } catch {
       return null;
     }
+  }
+
+  private isWirelessSerial(serial: string): boolean {
+    return /:\d+$/.test(serial) || /adb-tls-connect|_adb-tls-pairing/i.test(serial);
+  }
+
+  async getBatteryInfo(serial: string): Promise<DeviceBatteryInfo> {
+    try {
+      const { stdout } = await this.run(["shell", "dumpsys", "battery"], serial);
+      const levelMatch = stdout.match(/level:\s*(\d+)/i);
+      const statusMatch = stdout.match(/status:\s*(\d+)/i);
+      const pluggedMatch = stdout.match(/powered:\s*(true|false)/i);
+      const usbMatch = stdout.match(/USB powered:\s*(true|false)/i);
+      const acMatch = stdout.match(/AC powered:\s*(true|false)/i);
+      const wirelessMatch = stdout.match(/Wireless powered:\s*(true|false)/i);
+      const level = levelMatch ? Number.parseInt(levelMatch[1], 10) : undefined;
+      const statusCode = statusMatch ? Number.parseInt(statusMatch[1], 10) : undefined;
+      // BatteryManager: 2=CHARGING, 5=FULL
+      const chargingFromStatus = statusCode === 2 || statusCode === 5;
+      const plugged =
+        pluggedMatch?.[1] === "true" ||
+        usbMatch?.[1] === "true" ||
+        acMatch?.[1] === "true" ||
+        wirelessMatch?.[1] === "true";
+      const statusNames: Record<number, string> = {
+        1: "Unknown",
+        2: "Charging",
+        3: "Discharging",
+        4: "Not charging",
+        5: "Full",
+      };
+      return {
+        level: Number.isFinite(level) ? level : undefined,
+        charging: chargingFromStatus || plugged,
+        status: statusCode != null ? statusNames[statusCode] : undefined,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  async getStorageInfo(serial: string): Promise<DeviceStorageInfo> {
+    try {
+      const { stdout } = await this.shell("df -h /sdcard 2>/dev/null || df -h /data", serial);
+      const lines = stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const dataLine = lines.find((l) => !l.toLowerCase().startsWith("filesystem")) ?? lines[1];
+      if (!dataLine) return {};
+      const parts = dataLine.split(/\s+/);
+      // Filesystem Size Used Avail Use% Mounted
+      if (parts.length >= 4) {
+        return {
+          total: parts[1],
+          used: parts[2],
+          available: parts[3],
+          raw: dataLine,
+        };
+      }
+      return { raw: dataLine };
+    } catch {
+      return {};
+    }
+  }
+
+  async getDeviceDetails(serial: string): Promise<DeviceDetails> {
+    const connection = this.isWirelessSerial(serial) ? "Wireless" : "Cable";
+    try {
+      const devices = await this.listDevices();
+      const found = devices.find((d) => d.serial === serial);
+      if (!found) {
+        return {
+          serial,
+          connection,
+          available: false,
+          unavailableReason: "Device not found",
+        };
+      }
+      if (found.state !== "device") {
+        return {
+          serial,
+          model: found.model,
+          connection,
+          available: false,
+          unavailableReason:
+            found.state === "unauthorized"
+              ? "Unauthorized — allow USB debugging on the phone"
+              : `Device is ${found.state}`,
+        };
+      }
+
+      const [model, androidVersion, sdk, battery, ip, storage] = await Promise.all([
+        found.model
+          ? Promise.resolve(found.model)
+          : this.getProp(serial, "ro.product.model").catch(() => ""),
+        this.getProp(serial, "ro.build.version.release").catch(() => ""),
+        this.getProp(serial, "ro.build.version.sdk").catch(() => ""),
+        this.getBatteryInfo(serial),
+        this.getDeviceIp(serial),
+        this.getStorageInfo(serial),
+      ]);
+
+      return {
+        serial,
+        model: model || found.model || found.product,
+        androidVersion: androidVersion || undefined,
+        sdk: sdk || undefined,
+        battery,
+        ip,
+        storage,
+        connection,
+        available: true,
+      };
+    } catch (err) {
+      return {
+        serial,
+        connection,
+        available: false,
+        unavailableReason: String(err),
+      };
+    }
+  }
+
+  /**
+   * Push a file or directory. adb push is recursive for directories.
+   * Progress is best-effort from adb stderr percentage lines.
+   */
+  pushWithProgress(
+    serial: string,
+    localPath: string,
+    remotePath: string,
+    onProgress?: (p: TransferProgress) => void
+  ): { promise: Promise<void>; child: ReturnType<AdbClient["spawnShell"]> } {
+    const fullArgs = ["-s", serial, "push", localPath, remotePath];
+    const child = spawn(this.adbPath, fullArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const promise = new Promise<void>((resolve, reject) => {
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stderr += text;
+        const match = text.match(/(\d+)%/);
+        if (match) {
+          onProgress?.({
+            phase: "push",
+            localPath,
+            remotePath,
+            percent: Number.parseInt(match[1], 10),
+            message: path.basename(localPath),
+          });
+        }
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `adb push failed (${code})`));
+      });
+    });
+    return { promise, child };
+  }
+
+  pullWithProgress(
+    serial: string,
+    remotePath: string,
+    localPath: string,
+    onProgress?: (p: TransferProgress) => void
+  ): { promise: Promise<void>; child: ReturnType<AdbClient["spawnShell"]> } {
+    const fullArgs = ["-s", serial, "pull", remotePath, localPath];
+    const child = spawn(this.adbPath, fullArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const promise = new Promise<void>((resolve, reject) => {
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stderr += text;
+        const match = text.match(/(\d+)%/);
+        if (match) {
+          onProgress?.({
+            phase: "pull",
+            localPath,
+            remotePath,
+            percent: Number.parseInt(match[1], 10),
+            message: path.basename(remotePath),
+          });
+        }
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `adb pull failed (${code})`));
+      });
+    });
+    return { promise, child };
   }
 
   async screencap(serial: string, destPath: string): Promise<string> {

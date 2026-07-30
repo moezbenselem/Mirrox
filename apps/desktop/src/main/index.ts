@@ -10,14 +10,20 @@ import {
 } from "electron";
 import path from "node:path";
 import fs from "node:fs";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { AdbClient, shellQuote, type AdbDevice } from "@mirrox/adb";
-import { MirrorManager, type QualityPreset } from "@mirrox/mirror";
+import {
+  MirrorManager,
+  type QualityPreset,
+  type VideoSource,
+  type CameraFacing,
+} from "@mirrox/mirror";
 import {
   MirrorShortcutManager,
   MIRROR_SHORTCUTS,
   type MirrorShortcutAction,
 } from "./mirrorShortcuts";
+import { loadSettings, saveSettings } from "./settings";
 
 function resolveVendorBin(name: string): string {
   const packaged = path.join(process.resourcesPath, "bin", name);
@@ -119,14 +125,25 @@ let shortcutTarget: string | null = null;
 let quality: QualityPreset = "medium";
 let alwaysOnTop = false;
 let keepScreenOn = true;
+let navBarEnabled = false;
+let clipboardAutosyncDefault = true;
+let screenshotCopyToClipboard = false;
+let onboardingDismissed = false;
+let updateBannerDismissedVersion: string | null = null;
 
 const audioBySerial = new Map<string, boolean>();
+const clipboardBySerial = new Map<string, boolean>();
+const clipboardToastShown = new Set<string>();
+const videoSourceBySerial = new Map<string, VideoSource>();
+const cameraFacingBySerial = new Map<string, CameraFacing>();
+const cameraIdBySerial = new Map<string, string>();
 const fullscreenBySerial = new Map<string, boolean>();
 const restartingSerials = new Set<string>();
 const recordings = new Map<
   string,
   { child: ChildProcess; remotePath: string; startedAt: number }
 >();
+let activeTransfer: ChildProcess | null = null;
 
 function markRestarting(serial: string, ms = 3000): void {
   restartingSerials.add(serial);
@@ -227,16 +244,26 @@ async function exitFullscreenViaEscape(): Promise<void> {
 async function takeScreenshotInternal(serial: string): Promise<{
   path: string;
   dataUrl: string;
+  copiedToClipboard: boolean;
 }> {
   const tempPath = path.join(
     app.getPath("temp"),
-    `mirrox-shot-${serial.replace(/[^\w.-]/g, "_")}-${Date.now()}.png`
+    `mirrox-shot-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.png`
   );
   await adb.screencap(serial, tempPath);
+  let copiedToClipboard = false;
+  if (screenshotCopyToClipboard) {
+    const image = nativeImage.createFromPath(tempPath);
+    if (!image.isEmpty()) {
+      clipboard.writeImage(image);
+      copiedToClipboard = true;
+    }
+  }
   const buf = fs.readFileSync(tempPath);
   return {
     path: tempPath,
     dataUrl: `data:image/png;base64,${buf.toString("base64")}`,
+    copiedToClipboard,
   };
 }
 
@@ -286,7 +313,11 @@ async function refreshDevices(): Promise<AdbDevice[]> {
     mirroring: mirrors.isRunning(d.serial),
     fullscreen: fullscreenBySerial.get(d.serial) ?? false,
     audio: audioBySerial.get(d.serial) ?? true,
+    clipboardAutosync: clipboardBySerial.get(d.serial) ?? clipboardAutosyncDefault,
+    videoSource: videoSourceBySerial.get(d.serial) ?? "display",
+    cameraFacing: cameraFacingBySerial.get(d.serial) ?? "back",
     recording: recordings.has(d.serial),
+    connection: connectionMethodLabel(d.serial),
   }));
   send("devices:updated", withSessions);
   return withSessions;
@@ -318,12 +349,20 @@ async function resolveDeviceDisplayName(serial: string): Promise<string> {
 
 async function mirrorWindowTitle(serial: string): Promise<string> {
   const name = await resolveDeviceDisplayName(serial);
+  const source = videoSourceBySerial.get(serial) ?? "display";
+  if (source === "camera") {
+    return `${name} — Camera`;
+  }
   return `${name} — ${connectionMethodLabel(serial)}`;
 }
 
 async function startMirror(serial: string, fullscreen = false): Promise<void> {
   if (mirrors.isRunning(serial)) return;
   const audio = audioBySerial.get(serial) ?? true;
+  const clipboardAutosync = clipboardBySerial.get(serial) ?? clipboardAutosyncDefault;
+  const videoSource = videoSourceBySerial.get(serial) ?? "display";
+  const cameraFacing = cameraFacingBySerial.get(serial) ?? "back";
+  const cameraId = cameraIdBySerial.get(serial);
   const scrcpyPath = resolveVendorBin("scrcpy");
   fullscreenBySerial.set(serial, fullscreen);
   if (keepScreenOn) {
@@ -335,6 +374,10 @@ async function startMirror(serial: string, fullscreen = false): Promise<void> {
     alwaysOnTop,
     stayAwake: keepScreenOn,
     audio,
+    clipboardAutosync,
+    videoSource,
+    cameraFacing: videoSource === "camera" ? cameraFacing : undefined,
+    cameraId: videoSource === "camera" ? cameraId : undefined,
     fullscreen,
     adbPath: adb.adbPath,
     scrcpyPath,
@@ -345,16 +388,29 @@ async function startMirror(serial: string, fullscreen = false): Promise<void> {
   });
   shortcutTarget = serial;
   syncMirrorShortcuts();
+
+  if (clipboardAutosync && !clipboardToastShown.has(serial)) {
+    clipboardToastShown.add(serial);
+    send("mirror:clipboard-hint", { serial });
+  }
 }
 
 async function mirrorRestartPatch(serial: string) {
   const scrcpyPath = resolveVendorBin("scrcpy");
+  const videoSource = videoSourceBySerial.get(serial) ?? "display";
   return {
     serial,
     quality,
     alwaysOnTop,
     stayAwake: keepScreenOn,
     audio: audioBySerial.get(serial) ?? true,
+    clipboardAutosync: clipboardBySerial.get(serial) ?? clipboardAutosyncDefault,
+    videoSource,
+    cameraFacing:
+      videoSource === "camera"
+        ? (cameraFacingBySerial.get(serial) ?? "back")
+        : undefined,
+    cameraId: videoSource === "camera" ? cameraIdBySerial.get(serial) : undefined,
     fullscreen: fullscreenBySerial.get(serial) ?? false,
     adbPath: adb.adbPath,
     scrcpyPath,
@@ -510,9 +566,126 @@ function registerIpc(): void {
   ipcMain.handle("device:getSession", async (_e, serial: string) => ({
     serial,
     audio: audioBySerial.get(serial) ?? true,
+    clipboardAutosync: clipboardBySerial.get(serial) ?? clipboardAutosyncDefault,
+    videoSource: videoSourceBySerial.get(serial) ?? "display",
+    cameraFacing: cameraFacingBySerial.get(serial) ?? "back",
     mirroring: mirrors.isRunning(serial),
     fullscreen: fullscreenBySerial.get(serial) ?? false,
   }));
+
+  ipcMain.handle("device:setClipboard", async (_e, serial: string, enabled: boolean) => {
+    clipboardBySerial.set(serial, enabled);
+    if (mirrors.isRunning(serial)) {
+      markRestarting(serial);
+      await mirrors.restart(serial, {
+        ...(await mirrorRestartPatch(serial)),
+        clipboardAutosync: enabled,
+      });
+    }
+    await refreshDevices();
+    return { ok: true, clipboardAutosync: enabled };
+  });
+
+  ipcMain.handle(
+    "device:setVideoSource",
+    async (_e, serial: string, source: VideoSource) => {
+      videoSourceBySerial.set(serial, source);
+      if (mirrors.isRunning(serial)) {
+        markRestarting(serial);
+        await mirrors.restart(serial, await mirrorRestartPatch(serial));
+      }
+      await refreshDevices();
+      return { ok: true, videoSource: source };
+    }
+  );
+
+  ipcMain.handle(
+    "device:setCameraFacing",
+    async (_e, serial: string, facing: CameraFacing) => {
+      cameraFacingBySerial.set(serial, facing);
+      if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        markRestarting(serial);
+        await mirrors.restart(serial, await mirrorRestartPatch(serial));
+      }
+      await refreshDevices();
+      return { ok: true, cameraFacing: facing };
+    }
+  );
+
+  ipcMain.handle("device:setCameraId", async (_e, serial: string, cameraId: string | null) => {
+    if (cameraId) cameraIdBySerial.set(serial, cameraId);
+    else cameraIdBySerial.delete(serial);
+    if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+      markRestarting(serial);
+      await mirrors.restart(serial, await mirrorRestartPatch(serial));
+    }
+    await refreshDevices();
+    return { ok: true, cameraId };
+  });
+
+  ipcMain.handle("device:listCameras", async (_e, serial: string) => {
+    const scrcpyPath = resolveVendorBin("scrcpy");
+    const env = { ...process.env, ADB: adb.adbPath };
+    const serverPath = resolveScrcpyServer(scrcpyPath);
+    if (serverPath) env.SCRCPY_SERVER_PATH = serverPath;
+    return await new Promise<{ cameras: Array<{ id: string; label: string }>; raw: string }>(
+      (resolve, reject) => {
+        const child = spawn(scrcpyPath, ["--serial", serial, "--list-cameras"], {
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let out = "";
+        child.stdout?.on("data", (c: Buffer) => {
+          out += c.toString();
+        });
+        child.stderr?.on("data", (c: Buffer) => {
+          out += c.toString();
+        });
+        child.on("error", reject);
+        child.on("exit", () => {
+          const cameras: Array<{ id: string; label: string }> = [];
+          for (const line of out.split("\n")) {
+            // Typical: "--camera-id=0    (rear, ...)" or "Camera id: 0"
+            const m =
+              line.match(/--camera-id=(\d+)\s*(.*)/i) ||
+              line.match(/camera(?:\s+id)?\s*[:=]\s*(\d+)\s*(.*)/i);
+            if (m) {
+              cameras.push({
+                id: m[1],
+                label: (m[2] || `Camera ${m[1]}`).trim() || `Camera ${m[1]}`,
+              });
+            }
+          }
+          resolve({ cameras, raw: out });
+        });
+      }
+    );
+  });
+
+  ipcMain.handle("device:getInfo", async (_e, serial: string) => adb.getDeviceDetails(serial));
+
+  ipcMain.handle(
+    "device:keyevent",
+    async (_e, serial: string, code: number | string) => {
+      await adb.keyevent(serial, code);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    "device:nav",
+    async (
+      _e,
+      serial: string,
+      action: "back" | "home" | "recents" | "notifications"
+    ) => {
+      if (action === "back") await adb.keyevent(serial, 4);
+      else if (action === "home") await adb.keyevent(serial, 3);
+      else if (action === "recents") await adb.keyevent(serial, 187);
+      else if (action === "notifications") await adb.expandNotifications(serial);
+      return { ok: true };
+    }
+  );
 
   ipcMain.handle("device:setScreen", async (_e, serial: string, on: boolean) => {
     await adb.setDisplayPower(serial, on);
@@ -539,6 +712,11 @@ function registerIpc(): void {
       quality,
       alwaysOnTop,
       keepScreenOn,
+      navBarEnabled,
+      clipboardAutosyncDefault,
+      screenshotCopyToClipboard,
+      onboardingDismissed,
+      updateBannerDismissedVersion,
       adbPath: adb.adbPath,
       scrcpyPath,
       scrcpyServerPath: resolveScrcpyServer(scrcpyPath) ?? null,
@@ -549,7 +727,16 @@ function registerIpc(): void {
     "settings:set",
     async (
       _e,
-      partial: { quality?: QualityPreset; alwaysOnTop?: boolean; keepScreenOn?: boolean }
+      partial: {
+        quality?: QualityPreset;
+        alwaysOnTop?: boolean;
+        keepScreenOn?: boolean;
+        navBarEnabled?: boolean;
+        clipboardAutosyncDefault?: boolean;
+        screenshotCopyToClipboard?: boolean;
+        onboardingDismissed?: boolean;
+        updateBannerDismissedVersion?: string | null;
+      }
     ) => {
       const qualityChanged = Boolean(partial.quality) && partial.quality !== quality;
       const alwaysOnTopChanged =
@@ -560,6 +747,31 @@ function registerIpc(): void {
       if (partial.quality) quality = partial.quality;
       if (typeof partial.alwaysOnTop === "boolean") alwaysOnTop = partial.alwaysOnTop;
       if (typeof partial.keepScreenOn === "boolean") keepScreenOn = partial.keepScreenOn;
+      if (typeof partial.navBarEnabled === "boolean") navBarEnabled = partial.navBarEnabled;
+      if (typeof partial.clipboardAutosyncDefault === "boolean") {
+        clipboardAutosyncDefault = partial.clipboardAutosyncDefault;
+      }
+      if (typeof partial.screenshotCopyToClipboard === "boolean") {
+        screenshotCopyToClipboard = partial.screenshotCopyToClipboard;
+      }
+      if (typeof partial.onboardingDismissed === "boolean") {
+        onboardingDismissed = partial.onboardingDismissed;
+      }
+      if (partial.updateBannerDismissedVersion !== undefined) {
+        updateBannerDismissedVersion = partial.updateBannerDismissedVersion;
+      }
+
+      saveSettings({
+        quality,
+        alwaysOnTop,
+        keepScreenOn,
+        navBarEnabled,
+        clipboardAutosyncDefault,
+        screenshotCopyToClipboard,
+        onboardingDismissed,
+        updateBannerDismissedVersion,
+      });
+
       mirrors.updateDefaults({ quality, alwaysOnTop, stayAwake: keepScreenOn });
 
       if (keepScreenOnChanged) {
@@ -570,13 +782,21 @@ function registerIpc(): void {
         }
       }
 
-      // scrcpy picks up quality / window / stay-awake only at launch — restart live sessions
       if (qualityChanged || alwaysOnTopChanged || keepScreenOnChanged) {
         restartRunningMirrors();
         await refreshDevices();
       }
 
-      return { quality, alwaysOnTop, keepScreenOn };
+      return {
+        quality,
+        alwaysOnTop,
+        keepScreenOn,
+        navBarEnabled,
+        clipboardAutosyncDefault,
+        screenshotCopyToClipboard,
+        onboardingDismissed,
+        updateBannerDismissedVersion,
+      };
     }
   );
 
@@ -590,6 +810,17 @@ function registerIpc(): void {
     const result = await adb.connect(hostPort.trim());
     await refreshDevices();
     return { result };
+  });
+
+  ipcMain.handle("wireless:pair", async (_e, hostPort: string, code: string) => {
+    const result = await adb.pair(hostPort.trim(), code.trim());
+    return { result };
+  });
+
+  ipcMain.handle("wireless:disconnect", async (_e, hostPort?: string) => {
+    await adb.disconnect(hostPort?.trim() || undefined);
+    await refreshDevices();
+    return { ok: true };
   });
 
   ipcMain.handle("screenshot:take", async (_e, serial: string) => {
@@ -663,19 +894,58 @@ function registerIpc(): void {
   ipcMain.handle(
     "fs:upload",
     async (_e, serial: string, remoteDir: string, localPaths: string[]) => {
-      const results = [];
+      const results: Array<{
+        localPath: string;
+        action: "install" | "push";
+        detail: string;
+        error?: string;
+      }> = [];
       for (const localPath of localPaths) {
         const base = path.basename(localPath);
         const remotePath = `${remoteDir.replace(/\/+$/, "")}/${base}`;
         const ext = path.extname(localPath).toLowerCase();
-        if (ext === ".apk") {
-          const detail = await adb.install(serial, localPath);
-          results.push({ localPath, action: "install" as const, detail });
-        } else {
-          await adb.push(serial, localPath, remotePath);
-          results.push({ localPath, action: "push" as const, detail: remotePath });
+        try {
+          if (ext === ".apk" && fs.statSync(localPath).isFile()) {
+            send("fs:progress", {
+              phase: "push",
+              message: `Installing ${base}…`,
+              percent: undefined,
+            });
+            const detail = await adb.install(serial, localPath);
+            results.push({ localPath, action: "install", detail });
+          } else {
+            send("fs:progress", {
+              phase: "push",
+              message: `Uploading ${base}…`,
+              percent: 0,
+            });
+            const { promise, child } = adb.pushWithProgress(
+              serial,
+              localPath,
+              remotePath,
+              (p) =>
+                send("fs:progress", {
+                  phase: "push",
+                  message: `Uploading ${p.message ?? base}…`,
+                  percent: p.percent,
+                })
+            );
+            activeTransfer = child;
+            await promise;
+            activeTransfer = null;
+            results.push({ localPath, action: "push", detail: remotePath });
+          }
+        } catch (err) {
+          activeTransfer = null;
+          results.push({
+            localPath,
+            action: ext === ".apk" ? "install" : "push",
+            detail: "",
+            error: String(err),
+          });
         }
       }
+      send("fs:progress", { phase: "push", message: null, percent: null, done: true });
       return { results };
     }
   );
@@ -691,16 +961,185 @@ function registerIpc(): void {
       if (canceled || !filePaths[0]) return { ok: false, canceled: true, results: [] };
 
       const destDir = filePaths[0];
-      const results = [];
+      const results: Array<{
+        remotePath: string;
+        localPath: string;
+        error?: string;
+      }> = [];
       for (const remotePath of remotePaths) {
         const base = path.basename(remotePath);
         const localPath = path.join(destDir, base);
-        await adb.pull(serial, remotePath, localPath);
-        results.push({ remotePath, localPath });
+        try {
+          send("fs:progress", {
+            phase: "pull",
+            message: `Downloading ${base}…`,
+            percent: 0,
+          });
+          const { promise, child } = adb.pullWithProgress(
+            serial,
+            remotePath,
+            localPath,
+            (p) =>
+              send("fs:progress", {
+                phase: "pull",
+                message: `Downloading ${p.message ?? base}…`,
+                percent: p.percent,
+              })
+          );
+          activeTransfer = child;
+          await promise;
+          activeTransfer = null;
+          results.push({ remotePath, localPath });
+        } catch (err) {
+          activeTransfer = null;
+          results.push({ remotePath, localPath, error: String(err) });
+        }
       }
+      send("fs:progress", { phase: "pull", message: null, percent: null, done: true });
       return { ok: true, destDir, results };
     }
   );
+
+  ipcMain.handle("fs:cancelTransfer", async () => {
+    if (activeTransfer && !activeTransfer.killed) {
+      try {
+        activeTransfer.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      activeTransfer = null;
+      send("fs:progress", { phase: "push", message: null, percent: null, done: true, canceled: true });
+      return { ok: true, canceled: true };
+    }
+    return { ok: true, canceled: false };
+  });
+
+  ipcMain.handle("fs:preview", async (_e, serial: string, remotePath: string) => {
+    const name = path.basename(remotePath);
+    const ext = path.extname(name).toLowerCase();
+    const imageExts = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
+    const textExts = new Set([
+      ".txt",
+      ".log",
+      ".json",
+      ".xml",
+      ".md",
+      ".csv",
+      ".html",
+      ".htm",
+      ".css",
+      ".js",
+      ".ts",
+      ".jsx",
+      ".tsx",
+      ".yml",
+      ".yaml",
+      ".ini",
+      ".conf",
+      ".prop",
+      ".properties",
+      ".sh",
+      ".bat",
+      ".kt",
+      ".java",
+      ".gradle",
+      ".gitignore",
+    ]);
+
+    let kind: "image" | "text" | "unsupported" = "unsupported";
+    if (imageExts.has(ext)) kind = "image";
+    else if (textExts.has(ext)) kind = "text";
+
+    const maxImage = 40 * 1024 * 1024;
+    const maxText = 1.5 * 1024 * 1024;
+
+    let size = 0;
+    try {
+      const { stdout } = await adb.shell(`wc -c < ${shellQuote(remotePath)}`, serial);
+      size = Number.parseInt(stdout.trim(), 10) || 0;
+    } catch {
+      size = 0;
+    }
+
+    if (kind === "image" && size > maxImage) {
+      throw new Error("Image is too large to preview (over 40 MB). Download it instead.");
+    }
+    if (kind === "text" && size > maxText) {
+      throw new Error("File is too large to preview as text. Download it instead.");
+    }
+
+    const tempPath = path.join(
+      app.getPath("temp"),
+      `mirrox-preview-${Date.now()}-${name.replace(/[^\w.-]+/g, "_")}`
+    );
+    await adb.pull(serial, remotePath, tempPath);
+
+    if (kind === "unsupported" && size > 0 && size <= maxText) {
+      const sample = fs.readFileSync(tempPath).subarray(0, Math.min(512, size));
+      const printable = [...sample].filter(
+        (b) => b === 9 || b === 10 || b === 13 || (b >= 32 && b < 127)
+      ).length;
+      if (sample.length && printable / sample.length > 0.85) kind = "text";
+    }
+
+    if (kind === "image") {
+      const buf = fs.readFileSync(tempPath);
+      const mime =
+        ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : ext === ".gif"
+            ? "image/gif"
+            : ext === ".webp"
+              ? "image/webp"
+              : ext === ".svg"
+                ? "image/svg+xml"
+                : ext === ".bmp"
+                  ? "image/bmp"
+                  : "image/png";
+      return {
+        ok: true,
+        kind: "image" as const,
+        name,
+        remotePath,
+        tempPath,
+        size,
+        dataUrl: `data:${mime};base64,${buf.toString("base64")}`,
+      };
+    }
+
+    if (kind === "text") {
+      const text = fs.readFileSync(tempPath, "utf8");
+      return {
+        ok: true,
+        kind: "text" as const,
+        name,
+        remotePath,
+        tempPath,
+        size,
+        text,
+      };
+    }
+
+    return {
+      ok: true,
+      kind: "unsupported" as const,
+      name,
+      remotePath,
+      tempPath,
+      size,
+    };
+  });
+
+  ipcMain.handle("fs:discardPreview", async (_e, tempPath: string) => {
+    if (tempPath && fs.existsSync(tempPath)) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true };
+  });
 
   ipcMain.handle("fs:mkdir", async (_e, serial: string, remotePath: string) => {
     await adb.mkdir(serial, remotePath);
@@ -752,8 +1191,17 @@ function registerIpc(): void {
 
   ipcMain.handle("fs:pickUpload", async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog({
-      title: "Upload to device",
+      title: "Upload files to device",
       properties: ["openFile", "multiSelections"],
+    });
+    if (canceled) return [];
+    return filePaths;
+  });
+
+  ipcMain.handle("fs:pickUploadFolder", async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: "Upload folder to device",
+      properties: ["openDirectory"],
     });
     if (canceled) return [];
     return filePaths;
@@ -770,11 +1218,52 @@ function registerIpc(): void {
     if (canceled) return [];
     return filePaths;
   });
+
+  ipcMain.handle("updates:check", async () => {
+    try {
+      const { autoUpdater } = await import("electron-updater");
+      if (!app.isPackaged) {
+        return { ok: false, reason: "Updates only in packaged builds" };
+      }
+      const result = await autoUpdater.checkForUpdates();
+      return { ok: true, updateInfo: result?.updateInfo ?? null };
+    } catch (err) {
+      return { ok: false, reason: String(err) };
+    }
+  });
+
+  ipcMain.handle("updates:install", async () => {
+    try {
+      const { autoUpdater } = await import("electron-updater");
+      autoUpdater.quitAndInstall(false, true);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: String(err) };
+    }
+  });
 }
 
 app.setName("Mirrox");
 
 app.whenReady().then(() => {
+  const persisted = loadSettings();
+  if (persisted.quality) quality = persisted.quality;
+  if (typeof persisted.alwaysOnTop === "boolean") alwaysOnTop = persisted.alwaysOnTop;
+  if (typeof persisted.keepScreenOn === "boolean") keepScreenOn = persisted.keepScreenOn;
+  if (typeof persisted.navBarEnabled === "boolean") navBarEnabled = persisted.navBarEnabled;
+  if (typeof persisted.clipboardAutosyncDefault === "boolean") {
+    clipboardAutosyncDefault = persisted.clipboardAutosyncDefault;
+  }
+  if (typeof persisted.screenshotCopyToClipboard === "boolean") {
+    screenshotCopyToClipboard = persisted.screenshotCopyToClipboard;
+  }
+  if (typeof persisted.onboardingDismissed === "boolean") {
+    onboardingDismissed = persisted.onboardingDismissed;
+  }
+  if (persisted.updateBannerDismissedVersion !== undefined) {
+    updateBannerDismissedVersion = persisted.updateBannerDismissedVersion;
+  }
+
   const adbPath = resolveVendorBin("adb");
   adb = new AdbClient({ adbPath, pollIntervalMs: 1500 });
   mirrors = new MirrorManager({
@@ -794,7 +1283,29 @@ app.whenReady().then(() => {
     Menu.buildFromTemplate([
       {
         label: app.name,
-        submenu: [{ role: "about" }, { type: "separator" }, { role: "quit" }],
+        submenu: [
+          { role: "about" },
+          { type: "separator" },
+          {
+            label: "Check for Updates…",
+            click: () => {
+              void (async () => {
+                try {
+                  if (!app.isPackaged) {
+                    send("updates:error", "Updates only available in packaged builds");
+                    return;
+                  }
+                  const { autoUpdater } = await import("electron-updater");
+                  await autoUpdater.checkForUpdates();
+                } catch (err) {
+                  send("updates:error", String(err));
+                }
+              })();
+            },
+          },
+          { type: "separator" },
+          { role: "quit" },
+        ],
       },
       {
         label: "Edit",
@@ -814,6 +1325,34 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
+
+  if (app.isPackaged) {
+    void (async () => {
+      try {
+        const { autoUpdater } = await import("electron-updater");
+        autoUpdater.autoDownload = true;
+        autoUpdater.autoInstallOnAppQuit = true;
+        autoUpdater.on("update-available", (info) => {
+          send("updates:available", {
+            version: info.version,
+            releaseNotes: info.releaseNotes ?? null,
+          });
+        });
+        autoUpdater.on("download-progress", (progress) => {
+          send("updates:progress", { percent: progress.percent });
+        });
+        autoUpdater.on("update-downloaded", (info) => {
+          send("updates:ready", { version: info.version });
+        });
+        autoUpdater.on("error", (err) => {
+          send("updates:error", String(err));
+        });
+        await autoUpdater.checkForUpdates().catch(() => undefined);
+      } catch {
+        /* electron-updater optional at runtime in some builds */
+      }
+    })();
+  }
 
   adb.on("devices", () => {
     void refreshDevices();

@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import FileTransfer from "./FileTransfer";
+import DeviceInfoCard from "./DeviceInfoCard";
+import NavBar from "./NavBar";
+import Onboarding from "./Onboarding";
+import WirelessPairModal from "./WirelessPairModal";
+import UpdateBanner from "./UpdateBanner";
 import logoUrl from "./assets/logo.png";
 
 type DeviceState = "device" | "unauthorized" | "offline" | "unknown";
 type QualityPreset = "low" | "medium" | "high";
+type VideoSource = "display" | "camera";
+type CameraFacing = "front" | "back";
 
 interface DeviceInfo {
   serial: string;
@@ -14,7 +21,11 @@ interface DeviceInfo {
   mirroring?: boolean;
   fullscreen?: boolean;
   audio?: boolean;
+  clipboardAutosync?: boolean;
+  videoSource?: VideoSource;
+  cameraFacing?: CameraFacing;
   recording?: boolean;
+  connection?: "Cable" | "Wireless";
 }
 
 const MIRROR_SHORTCUTS = [
@@ -34,13 +45,15 @@ function formatAccelerator(accelerator: string): string {
   return accelerator.replace(/CommandOrControl/g, "Ctrl");
 }
 
-function MirrorShortcuts() {
+function MirrorShortcuts({ navBarEnabled }: { navBarEnabled: boolean }) {
   return (
     <div className="card mirror-shortcuts">
       <h3>Mirror shortcuts</h3>
       <p className="mirror-shortcuts-hint">
         Work while the scrcpy window is focused. Target is the selected mirroring device.
-        Fullscreen: button here, MOD+F in the mirror, or Esc to exit fullscreen.
+        Clipboard syncs Mac ↔ phone while mirroring (MOD+c / MOD+x / MOD+v in the mirror).
+        Fullscreen: button here, MOD+f in the mirror, or Esc to exit. Rotate: MOD+r. Pinch zoom:
+        Ctrl+drag.
       </p>
       <div className="shortcut-grid">
         {MIRROR_SHORTCUTS.map((s) => (
@@ -50,10 +63,23 @@ function MirrorShortcuts() {
           </div>
         ))}
         <div className="shortcut-row">
+          <span className="shortcut-label">Rotate</span>
+          <kbd className="shortcut-key">MOD+r</kbd>
+        </div>
+        <div className="shortcut-row">
+          <span className="shortcut-label">Pinch zoom</span>
+          <kbd className="shortcut-key">Ctrl+drag</kbd>
+        </div>
+        <div className="shortcut-row">
           <span className="shortcut-label">Exit fullscreen</span>
           <kbd className="shortcut-key">Esc</kbd>
         </div>
       </div>
+      {!navBarEnabled && (
+        <p className="mirror-shortcuts-hint" style={{ marginTop: 8, marginBottom: 0 }}>
+          Enable the optional nav bar in Quality for Back / Home / Recents without focusing scrcpy.
+        </p>
+      )}
     </div>
   );
 }
@@ -71,6 +97,8 @@ export default function App() {
   const [quality, setQuality] = useState<QualityPreset>("medium");
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [keepScreenOn, setKeepScreenOn] = useState(true);
+  const [navBarEnabled, setNavBarEnabled] = useState(false);
+  const [screenshotCopyToClipboard, setScreenshotCopyToClipboard] = useState(false);
   const [wirelessHost, setWirelessHost] = useState("");
   const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(
     null
@@ -78,6 +106,16 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [screenOn, setScreenOn] = useState(true);
   const [demoMode, setDemoMode] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [pairOpen, setPairOpen] = useState(false);
+  const [cameras, setCameras] = useState<Array<{ id: string; label: string }>>([]);
+  const [cameraEmptyHint, setCameraEmptyHint] = useState(false);
+  const [update, setUpdate] = useState<{
+    version: string;
+    progress: number | null;
+    downloading: boolean;
+    ready: boolean;
+  } | null>(null);
   const [preview, setPreview] = useState<{
     path: string;
     dataUrl: string;
@@ -102,6 +140,9 @@ export default function App() {
       setQuality(s.quality);
       setAlwaysOnTop(s.alwaysOnTop);
       setKeepScreenOn(s.keepScreenOn);
+      setNavBarEnabled(s.navBarEnabled);
+      setScreenshotCopyToClipboard(Boolean(s.screenshotCopyToClipboard));
+      setShowOnboarding(!s.onboardingDismissed);
     });
 
     const offDevices = window.mirrox.onDevicesUpdated((list) => {
@@ -118,6 +159,23 @@ export default function App() {
     const offMirrorExit = window.mirrox.onMirrorExit(({ serial }) =>
       showToast("info", `Mirror closed for ${serial}`)
     );
+    const offClipboard = window.mirrox.onClipboardHint(() =>
+      showToast("info", "Clipboard syncs with this device while mirroring.")
+    );
+    const offUpdateAvail = window.mirrox.onUpdateAvailable(({ version }) => {
+      setUpdate({ version, progress: null, downloading: true, ready: false });
+    });
+    const offUpdateProg = window.mirrox.onUpdateProgress(({ percent }) => {
+      setUpdate((prev) =>
+        prev ? { ...prev, progress: percent, downloading: true, ready: false } : prev
+      );
+    });
+    const offUpdateReady = window.mirrox.onUpdateReady(({ version }) => {
+      setUpdate({ version, progress: 100, downloading: false, ready: true });
+    });
+    const offUpdateErr = window.mirrox.onUpdateError((message) =>
+      showToast("error", `Update failed — ${message}. Download DMG from GitHub if needed.`)
+    );
     const offMirrorShortcut = window.mirrox.onMirrorShortcut(
       ({ action, serial, error, payload }) => {
         if (error) {
@@ -125,9 +183,14 @@ export default function App() {
           return;
         }
         if (action === "screenshot" && payload && typeof payload === "object") {
-          const p = payload as { path?: string; dataUrl?: string };
+          const p = payload as {
+            path?: string;
+            dataUrl?: string;
+            copiedToClipboard?: boolean;
+          };
           if (p.path && p.dataUrl) {
             setPreview({ path: p.path, dataUrl: p.dataUrl, serial });
+            if (p.copiedToClipboard) showToast("ok", "Screenshot copied to clipboard");
           }
           return;
         }
@@ -149,6 +212,11 @@ export default function App() {
       offAdb();
       offMirrorErr();
       offMirrorExit();
+      offClipboard();
+      offUpdateAvail();
+      offUpdateProg();
+      offUpdateReady();
+      offUpdateErr();
       offMirrorShortcut();
     };
   }, [selected, showToast]);
@@ -169,13 +237,21 @@ export default function App() {
   const isFullscreen = Boolean(selectedDevice?.fullscreen);
   const recording = Boolean(selectedDevice?.recording);
   const audioOn = selectedDevice?.audio !== false;
+  const clipboardOn = selectedDevice?.clipboardAutosync !== false;
+  const videoSource = selectedDevice?.videoSource ?? "display";
+  const cameraFacing = selectedDevice?.cameraFacing ?? "back";
+  const hasReadyDevice = devices.some((d) => d.state === "device");
+  const isWireless = selectedDevice?.connection === "Wireless" || /:\d+$/.test(selectedDevice?.serial ?? "");
 
   async function startMirror() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
       await window.mirrox.startMirror(selectedDevice.serial);
-      showToast("ok", `Mirroring ${selectedDevice.model ?? selectedDevice.serial}`);
+      showToast(
+        "ok",
+        `Mirroring ${selectedDevice.model ?? selectedDevice.serial}${videoSource === "camera" ? " (camera)" : ""}`
+      );
     } catch (err) {
       showToast("error", String(err));
     } finally {
@@ -227,6 +303,11 @@ export default function App() {
     await window.mirrox.setSettings({ keepScreenOn: next });
   }
 
+  async function updateNavBar(next: boolean) {
+    setNavBarEnabled(next);
+    await window.mirrox.setSettings({ navBarEnabled: next });
+  }
+
   async function enableWireless() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
@@ -258,6 +339,19 @@ export default function App() {
     }
   }
 
+  async function disconnectWireless() {
+    if (!selectedDevice || !isWireless) return;
+    setBusy(true);
+    try {
+      await window.mirrox.disconnectWireless(selectedDevice.serial);
+      showToast("info", "Disconnected wireless device");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function screenshot() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
@@ -269,12 +363,20 @@ export default function App() {
           dataUrl: result.dataUrl,
           serial: selectedDevice.serial,
         });
+        if (result.copiedToClipboard) {
+          showToast("ok", "Screenshot copied to clipboard");
+        }
       }
     } catch (err) {
       showToast("error", String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function setScreenshotClipboardDefault(next: boolean) {
+    setScreenshotCopyToClipboard(next);
+    await window.mirrox.setSettings({ screenshotCopyToClipboard: next });
   }
 
   async function toggleRecord() {
@@ -304,6 +406,88 @@ export default function App() {
     try {
       await window.mirrox.setDeviceAudio(selectedDevice.serial, !audioOn);
       showToast("ok", !audioOn ? "Audio mirroring on" : "Audio mirroring off");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleClipboard() {
+    if (!selectedDevice || !canControl) return;
+    setBusy(true);
+    try {
+      await window.mirrox.setDeviceClipboard(selectedDevice.serial, !clipboardOn);
+      showToast("ok", !clipboardOn ? "Clipboard sync on" : "Clipboard sync off");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setSource(next: VideoSource) {
+    if (!selectedDevice || !canControl) return;
+    if (mirroring && videoSource !== next) {
+      const ok = window.confirm(
+        next === "camera"
+          ? "Switch to camera preview? The mirror will restart."
+          : "Switch back to screen mirror? The mirror will restart."
+      );
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      await window.mirrox.setVideoSource(selectedDevice.serial, next);
+      if (next === "camera") {
+        const listed = await window.mirrox.listCameras(selectedDevice.serial);
+        setCameras(listed.cameras);
+        setCameraEmptyHint(listed.cameras.length === 0);
+        if (listed.cameras.length === 0) {
+          showToast(
+            "info",
+            "No cameras reported — open the Camera app once on the phone and retry."
+          );
+        }
+      } else {
+        setCameraEmptyHint(false);
+      }
+      showToast("ok", next === "camera" ? "Camera preview mode" : "Screen mirror mode");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setFacing(facing: CameraFacing) {
+    if (!selectedDevice || !canControl) return;
+    setBusy(true);
+    try {
+      await window.mirrox.setCameraFacing(selectedDevice.serial, facing);
+      showToast("ok", facing === "front" ? "Front camera" : "Back camera");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshCameras() {
+    if (!selectedDevice || !canControl) return;
+    setBusy(true);
+    try {
+      const listed = await window.mirrox.listCameras(selectedDevice.serial);
+      setCameras(listed.cameras);
+      setCameraEmptyHint(listed.cameras.length === 0);
+      if (listed.cameras.length === 0) {
+        showToast(
+          "info",
+          "No cameras reported — open the Camera app once on the phone and retry."
+        );
+      } else {
+        showToast("ok", `${listed.cameras.length} camera(s) found`);
+      }
     } catch (err) {
       showToast("error", String(err));
     } finally {
@@ -372,6 +556,13 @@ export default function App() {
     setPreview(null);
   }
 
+  async function dismissOnboarding(permanent: boolean) {
+    setShowOnboarding(false);
+    if (permanent) {
+      await window.mirrox.setSettings({ onboardingDismissed: true });
+    }
+  }
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -380,11 +571,30 @@ export default function App() {
           <h1>Mirrox</h1>
         </div>
         <div className="actions">
+          <button className="btn" onClick={() => setPairOpen(true)} disabled={busy}>
+            Pair
+          </button>
           <button className="btn" onClick={() => void window.mirrox.listDevices()} disabled={busy}>
             Refresh
           </button>
         </div>
       </header>
+
+      {update && (
+        <UpdateBanner
+          version={update.version}
+          progress={update.progress}
+          downloading={update.downloading}
+          ready={update.ready}
+          onInstall={() => void window.mirrox.installUpdate()}
+          onDismiss={() => {
+            void window.mirrox.setSettings({
+              updateBannerDismissedVersion: update.version,
+            });
+            setUpdate(null);
+          }}
+        />
+      )}
 
       <div className="layout">
         <aside className="sidebar">
@@ -397,8 +607,15 @@ export default function App() {
               <div className="empty">
                 <h3>No devices found</h3>
                 <p>
-                  Connect with a data cable and enable USB debugging. Accept the RSA prompt on the
-                  phone.
+                  Connect with a data cable and enable USB debugging, or{" "}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => setPairOpen(true)}
+                  >
+                    pair wirelessly
+                  </button>
+                  .
                 </p>
               </div>
             ) : (
@@ -446,10 +663,18 @@ export default function App() {
                     {selectedDevice.state === "unauthorized"
                       ? "Unauthorized — unlock the phone and allow USB debugging."
                       : mirroring
-                        ? `Native mirror window is open. Shortcuts: ${formatAccelerator("CommandOrControl+Shift+S")} screenshot, ${formatAccelerator("CommandOrControl+Shift+R")} record.`
+                        ? `Native mirror window is open${videoSource === "camera" ? " (camera)" : ""}. Shortcuts: ${formatAccelerator("CommandOrControl+Shift+S")} screenshot, ${formatAccelerator("CommandOrControl+Shift+R")} record.`
                         : "Ready to mirror. Click View to open a native scrcpy window."}
                   </p>
                 </div>
+
+                {canControl && (
+                  <DeviceInfoCard
+                    serial={selectedDevice.serial}
+                    state={selectedDevice.state}
+                    disabled={busy}
+                  />
+                )}
 
                 <div className="toolbar">
                   {mirroring ? (
@@ -465,6 +690,26 @@ export default function App() {
                       View
                     </button>
                   )}
+                  {canControl && (
+                    <div className="segmented" role="group" aria-label="Mirror source">
+                      <button
+                        type="button"
+                        className={`seg ${videoSource === "display" ? "active" : ""}`}
+                        disabled={busy}
+                        onClick={() => void setSource("display")}
+                      >
+                        Screen
+                      </button>
+                      <button
+                        type="button"
+                        className={`seg ${videoSource === "camera" ? "active" : ""}`}
+                        disabled={busy}
+                        onClick={() => void setSource("camera")}
+                      >
+                        Camera
+                      </button>
+                    </div>
+                  )}
                   <button
                     className="btn"
                     disabled={!canControl || busy}
@@ -472,7 +717,71 @@ export default function App() {
                   >
                     Go Wireless
                   </button>
+                  {isWireless && (
+                    <button
+                      className="btn"
+                      disabled={busy}
+                      onClick={() => void disconnectWireless()}
+                    >
+                      Disconnect
+                    </button>
+                  )}
                 </div>
+
+                {canControl && videoSource === "camera" && (
+                  <div className="card">
+                    <h3>Camera</h3>
+                    <div className="row">
+                      <span className="label">Facing</span>
+                      <button
+                        className={`btn ${cameraFacing === "back" ? "active-toggle" : ""}`}
+                        disabled={busy}
+                        onClick={() => void setFacing("back")}
+                      >
+                        Back
+                      </button>
+                      <button
+                        className={`btn ${cameraFacing === "front" ? "active-toggle" : ""}`}
+                        disabled={busy}
+                        onClick={() => void setFacing("front")}
+                      >
+                        Front
+                      </button>
+                      <button className="btn" disabled={busy} onClick={() => void refreshCameras()}>
+                        List cameras
+                      </button>
+                    </div>
+                    {cameraEmptyHint && (
+                      <p className="mirror-shortcuts-hint" style={{ margin: 0 }}>
+                        No cameras reported — open the Camera app once on the phone and retry.
+                      </p>
+                    )}
+                    {cameras.length > 0 && (
+                      <div className="row">
+                        <span className="label">Camera id</span>
+                        <select
+                          disabled={busy}
+                          defaultValue=""
+                          onChange={(e) => {
+                            const id = e.target.value || null;
+                            void window.mirrox.setCameraId(selectedDevice.serial, id);
+                          }}
+                        >
+                          <option value="">Auto (facing)</option>
+                          {cameras.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.id}: {c.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {canControl && navBarEnabled && (
+                  <NavBar serial={selectedDevice.serial} disabled={busy} onToast={showToast} />
+                )}
 
                 {canControl && (
                   <div className="card">
@@ -501,6 +810,14 @@ export default function App() {
                         title="Audio mirroring"
                       >
                         Audio {audioOn ? "on" : "off"}
+                      </button>
+                      <button
+                        className={`btn ${clipboardOn ? "active-toggle" : ""}`}
+                        disabled={busy}
+                        onClick={() => void toggleClipboard()}
+                        title="Clipboard sync Mac ↔ phone"
+                      >
+                        Clipboard {clipboardOn ? "on" : "off"}
                       </button>
                       <button
                         className="btn"
@@ -534,7 +851,7 @@ export default function App() {
                   </div>
                 )}
 
-                {canControl && mirroring && <MirrorShortcuts />}
+                {canControl && mirroring && <MirrorShortcuts navBarEnabled={navBarEnabled} />}
 
                 <div className="card">
                   <h3>Quality</h3>
@@ -564,6 +881,14 @@ export default function App() {
                       />
                       Keep screen on
                     </label>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={navBarEnabled}
+                        onChange={(e) => void updateNavBar(e.target.checked)}
+                      />
+                      Nav bar
+                    </label>
                   </div>
                 </div>
 
@@ -579,6 +904,9 @@ export default function App() {
                     />
                     <button className="btn" disabled={busy} onClick={() => void connectWireless()}>
                       Connect
+                    </button>
+                    <button className="btn" disabled={busy} onClick={() => setPairOpen(true)}>
+                      Pair with code…
                     </button>
                   </div>
                 </div>
@@ -599,6 +927,22 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {showOnboarding && (
+        <Onboarding
+          hasReadyDevice={hasReadyDevice}
+          onSkip={() => void dismissOnboarding(false)}
+          onDontShowAgain={() => void dismissOnboarding(true)}
+          onOpenWirelessPair={() => setPairOpen(true)}
+        />
+      )}
+
+      <WirelessPairModal
+        open={pairOpen}
+        busy={busy}
+        onClose={() => setPairOpen(false)}
+        onToast={showToast}
+      />
 
       {preview && (
         <div className="modal-backdrop" onClick={() => void closePreview()}>
@@ -624,6 +968,15 @@ export default function App() {
               <button className="btn" disabled={busy} onClick={() => void copyPreview()}>
                 Copy to clipboard
               </button>
+              <label className="modal-check">
+                <input
+                  type="checkbox"
+                  checked={screenshotCopyToClipboard}
+                  disabled={busy}
+                  onChange={(e) => void setScreenshotClipboardDefault(e.target.checked)}
+                />
+                Always copy to clipboard
+              </label>
             </div>
           </div>
         </div>

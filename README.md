@@ -29,6 +29,13 @@ Current version: **1.1.0**
 | **Files** | Browse device storage, upload/download, mkdir, rename, duplicate, delete |
 | **APK** | Drop or upload an `.apk` to install |
 | **Audio** | Toggle audio mirroring per device |
+| **Clipboard** | Toggle Mac ↔ phone clipboard sync while mirroring |
+| **Camera** | Preview phone camera via scrcpy (`--video-source=camera`) |
+| **Device info** | Model, Android version, battery, IP, storage, cable/wireless |
+| **Nav bar** | Optional Back / Home / Recents / Notifications |
+| **Onboarding** | First-run USB debugging guide |
+| **Pairing** | Wireless debugging pair code + connect (Android 11+) |
+| **Updates** | In-app updates via GitHub Releases (`electron-updater`) |
 | **Screen** | Wake / sleep the physical display while mirroring |
 | **Demo mode** | Android System UI Demo Mode (clean status bar for screenshots) |
 | **Shortcuts** | Global hotkeys while the scrcpy window is focused |
@@ -161,6 +168,10 @@ npm run package:all
 ```
 
 Code signing is currently disabled (`identity: null`) for local/distribution builds. Enable notarization before wide public distribution.
+
+### Auto-updates
+
+Packaged builds check GitHub Releases via `electron-updater` (`latest-mac.yml`). Publish DMGs with `electron-builder --publish`, and prefer code signing/notarization so Gatekeeper allows silent updates for users who already trust the app. Untyped / unsigned updates may still work after the user has allowed the app once.
 
 ---
 

@@ -19,7 +19,8 @@
   },
   "dependencies": {
     "@mirrox/adb": "*",
-    "@mirrox/mirror": "*"
+    "@mirrox/mirror": "*",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@types/react": "^19.0.10",
@@ -110,6 +111,13 @@
       "gatekeeperAssess": false,
       "identity": null
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "moezbenselem",
+        "repo": "Mirrox"
+      }
+    ],
     "asar": true
   }
 }
