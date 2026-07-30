@@ -125,16 +125,16 @@ mirrox/
 ### Process layout
 
 1. **Main process** — ADB watchers, scrcpy spawn/restart, IPC, screenshots/recording, global shortcuts  
-2. **Preload** — `contextBridge` API (`window.vysor`)  
+2. **Preload** — `contextBridge` API (`window.mirrox`)  
 3. **Renderer** — React device manager, settings, file transfer UI  
 4. **Native mirror** — one scrcpy window per device serial
 
 ### Packages
 
-- **`@vysor/adb`** — `AdbClient`: device list, wireless, screencap, stay-awake, demo mode, filesystem helpers  
-- **`@vysor/mirror`** — `MirrorManager`: quality presets, audio, always-on-top, restart on setting changes  
+- **`@mirrox/adb`** — `AdbClient`: device list, wireless, screencap, stay-awake, demo mode, filesystem helpers  
+- **`@mirrox/mirror`** — `MirrorManager`: quality presets, audio, always-on-top, restart on setting changes  
 
-Internal package scope remains `@vysor/*`; the product name is **Mirrox** (`com.mirrox.app`).
+Packages use the `@mirrox/*` scope (`com.mirrox.app`).
 
 ---
 

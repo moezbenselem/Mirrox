@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import FileTransfer from "./FileTransfer";
+import logoUrl from "./assets/logo.png";
 
 type DeviceState = "device" | "unauthorized" | "offline" | "unknown";
 type QualityPreset = "low" | "medium" | "high";
@@ -11,6 +12,7 @@ interface DeviceInfo {
   product?: string;
   device?: string;
   mirroring?: boolean;
+  fullscreen?: boolean;
   audio?: boolean;
   recording?: boolean;
 }
@@ -38,6 +40,7 @@ function MirrorShortcuts() {
       <h3>Mirror shortcuts</h3>
       <p className="mirror-shortcuts-hint">
         Work while the scrcpy window is focused. Target is the selected mirroring device.
+        Fullscreen: button here, MOD+F in the mirror, or Esc to exit fullscreen.
       </p>
       <div className="shortcut-grid">
         {MIRROR_SHORTCUTS.map((s) => (
@@ -46,6 +49,10 @@ function MirrorShortcuts() {
             <kbd className="shortcut-key">{formatAccelerator(s.accelerator)}</kbd>
           </div>
         ))}
+        <div className="shortcut-row">
+          <span className="shortcut-label">Exit fullscreen</span>
+          <kbd className="shortcut-key">Esc</kbd>
+        </div>
       </div>
     </div>
   );
@@ -87,31 +94,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void window.vysor.listDevices().then((list) => {
+    void window.mirrox.listDevices().then((list) => {
       setDevices(list);
       if (!selected && list[0]) setSelected(list[0].serial);
     });
-    void window.vysor.getSettings().then((s) => {
+    void window.mirrox.getSettings().then((s) => {
       setQuality(s.quality);
       setAlwaysOnTop(s.alwaysOnTop);
       setKeepScreenOn(s.keepScreenOn);
     });
 
-    const offDevices = window.vysor.onDevicesUpdated((list) => {
+    const offDevices = window.mirrox.onDevicesUpdated((list) => {
       setDevices(list);
       setSelected((prev) => {
         if (prev && list.some((d) => d.serial === prev)) return prev;
         return list[0]?.serial ?? null;
       });
     });
-    const offAdb = window.vysor.onAdbError((message) => showToast("error", message));
-    const offMirrorErr = window.vysor.onMirrorError(({ serial, error }) =>
+    const offAdb = window.mirrox.onAdbError((message) => showToast("error", message));
+    const offMirrorErr = window.mirrox.onMirrorError(({ serial, error }) =>
       showToast("error", `${serial}: ${error}`)
     );
-    const offMirrorExit = window.vysor.onMirrorExit(({ serial }) =>
+    const offMirrorExit = window.mirrox.onMirrorExit(({ serial }) =>
       showToast("info", `Mirror closed for ${serial}`)
     );
-    const offMirrorShortcut = window.vysor.onMirrorShortcut(
+    const offMirrorShortcut = window.mirrox.onMirrorShortcut(
       ({ action, serial, error, payload }) => {
         if (error) {
           showToast("error", error);
@@ -148,17 +155,18 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedDevice?.mirroring) return;
-    void window.vysor.setShortcutTarget(selectedDevice.serial);
+    void window.mirrox.setShortcutTarget(selectedDevice.serial);
   }, [selectedDevice?.serial, selectedDevice?.mirroring]);
 
   useEffect(() => {
     if (!selectedDevice || selectedDevice.state !== "device") return;
-    void window.vysor.getDeviceScreen(selectedDevice.serial).then((s) => setScreenOn(s.on));
-    void window.vysor.getDemoMode(selectedDevice.serial).then((s) => setDemoMode(s.enabled));
+    void window.mirrox.getDeviceScreen(selectedDevice.serial).then((s) => setScreenOn(s.on));
+    void window.mirrox.getDemoMode(selectedDevice.serial).then((s) => setDemoMode(s.enabled));
   }, [selectedDevice?.serial, selectedDevice?.state]);
 
   const canControl = selectedDevice?.state === "device";
   const mirroring = Boolean(selectedDevice?.mirroring);
+  const isFullscreen = Boolean(selectedDevice?.fullscreen);
   const recording = Boolean(selectedDevice?.recording);
   const audioOn = selectedDevice?.audio !== false;
 
@@ -166,7 +174,7 @@ export default function App() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
-      await window.vysor.startMirror(selectedDevice.serial);
+      await window.mirrox.startMirror(selectedDevice.serial);
       showToast("ok", `Mirroring ${selectedDevice.model ?? selectedDevice.serial}`);
     } catch (err) {
       showToast("error", String(err));
@@ -179,7 +187,7 @@ export default function App() {
     if (!selectedDevice) return;
     setBusy(true);
     try {
-      await window.vysor.stopMirror(selectedDevice.serial);
+      await window.mirrox.stopMirror(selectedDevice.serial);
       showToast("info", "Mirror stopped");
     } catch (err) {
       showToast("error", String(err));
@@ -189,10 +197,14 @@ export default function App() {
   }
 
   async function fullscreen() {
-    if (!selectedDevice || !canControl) return;
+    if (!selectedDevice || !canControl || !mirroring) return;
     setBusy(true);
     try {
-      await window.vysor.fullscreenMirror(selectedDevice.serial);
+      const result = await window.mirrox.fullscreenMirror(selectedDevice.serial);
+      showToast(
+        "info",
+        result.fullscreen ? "Fullscreen on — click again to exit" : "Exited fullscreen"
+      );
     } catch (err) {
       showToast("error", String(err));
     } finally {
@@ -202,24 +214,24 @@ export default function App() {
 
   async function updateQuality(next: QualityPreset) {
     setQuality(next);
-    await window.vysor.setSettings({ quality: next });
+    await window.mirrox.setSettings({ quality: next });
   }
 
   async function updateAlwaysOnTop(next: boolean) {
     setAlwaysOnTop(next);
-    await window.vysor.setSettings({ alwaysOnTop: next });
+    await window.mirrox.setSettings({ alwaysOnTop: next });
   }
 
   async function updateKeepScreenOn(next: boolean) {
     setKeepScreenOn(next);
-    await window.vysor.setSettings({ keepScreenOn: next });
+    await window.mirrox.setSettings({ keepScreenOn: next });
   }
 
   async function enableWireless() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
-      const result = await window.vysor.enableWireless(selectedDevice.serial);
+      const result = await window.mirrox.enableWireless(selectedDevice.serial);
       if (result.hint) {
         setWirelessHost(result.hint);
         showToast("ok", `TCP/IP enabled. Unplug USB, then Connect ${result.hint}`);
@@ -237,7 +249,7 @@ export default function App() {
     if (!wirelessHost.trim()) return;
     setBusy(true);
     try {
-      const { result } = await window.vysor.connectWireless(wirelessHost.trim());
+      const { result } = await window.mirrox.connectWireless(wirelessHost.trim());
       showToast("ok", result || `Connected to ${wirelessHost}`);
     } catch (err) {
       showToast("error", String(err));
@@ -250,7 +262,7 @@ export default function App() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
-      const result = await window.vysor.takeScreenshot(selectedDevice.serial);
+      const result = await window.mirrox.takeScreenshot(selectedDevice.serial);
       if (result.ok && result.path && result.dataUrl) {
         setPreview({
           path: result.path,
@@ -270,13 +282,13 @@ export default function App() {
     setBusy(true);
     try {
       if (recording) {
-        const result = await window.vysor.stopRecording(selectedDevice.serial);
+        const result = await window.mirrox.stopRecording(selectedDevice.serial);
         showToast(
           result.saved ? "ok" : "info",
           result.saved ? `Saved ${result.path}` : "Recording stopped"
         );
       } else {
-        await window.vysor.startRecording(selectedDevice.serial);
+        await window.mirrox.startRecording(selectedDevice.serial);
         showToast("ok", "Recording…");
       }
     } catch (err) {
@@ -290,7 +302,7 @@ export default function App() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
-      await window.vysor.setDeviceAudio(selectedDevice.serial, !audioOn);
+      await window.mirrox.setDeviceAudio(selectedDevice.serial, !audioOn);
       showToast("ok", !audioOn ? "Audio mirroring on" : "Audio mirroring off");
     } catch (err) {
       showToast("error", String(err));
@@ -304,7 +316,7 @@ export default function App() {
     setBusy(true);
     try {
       const next = !screenOn;
-      await window.vysor.setDeviceScreen(selectedDevice.serial, next);
+      await window.mirrox.setDeviceScreen(selectedDevice.serial, next);
       setScreenOn(next);
       showToast("ok", next ? "Device screen on" : "Device screen off");
     } catch (err) {
@@ -319,7 +331,7 @@ export default function App() {
     setBusy(true);
     try {
       const next = !demoMode;
-      await window.vysor.setDemoMode(selectedDevice.serial, next);
+      await window.mirrox.setDemoMode(selectedDevice.serial, next);
       setDemoMode(next);
       showToast("ok", next ? "Demo mode on" : "Demo mode off");
     } catch (err) {
@@ -333,7 +345,7 @@ export default function App() {
     if (!preview) return;
     setBusy(true);
     try {
-      const result = await window.vysor.saveScreenshot(preview.path, preview.serial);
+      const result = await window.mirrox.saveScreenshot(preview.path, preview.serial);
       if (result.ok && result.path) showToast("ok", `Saved ${result.path}`);
     } catch (err) {
       showToast("error", String(err));
@@ -346,7 +358,7 @@ export default function App() {
     if (!preview) return;
     setBusy(true);
     try {
-      await window.vysor.copyScreenshot(preview.path);
+      await window.mirrox.copyScreenshot(preview.path);
       showToast("ok", "Copied to clipboard");
     } catch (err) {
       showToast("error", String(err));
@@ -356,16 +368,19 @@ export default function App() {
   }
 
   async function closePreview() {
-    if (preview) void window.vysor.discardScreenshot(preview.path);
+    if (preview) void window.mirrox.discardScreenshot(preview.path);
     setPreview(null);
   }
 
   return (
     <div className="app">
       <header className="titlebar">
-        <h1>Mirrox</h1>
+        <div className="brand">
+          <img className="brand-logo" src={logoUrl} alt="" draggable={false} />
+          <h1>Mirrox</h1>
+        </div>
         <div className="actions">
-          <button className="btn" onClick={() => void window.vysor.listDevices()} disabled={busy}>
+          <button className="btn" onClick={() => void window.mirrox.listDevices()} disabled={busy}>
             Refresh
           </button>
         </div>
@@ -396,7 +411,7 @@ export default function App() {
                     onClick={() => setSelected(device.serial)}
                   >
                     <div className="device-top">
-                      <div className="device-icon" />
+                      <img className="device-icon" src={logoUrl} alt="" draggable={false} />
                       <div className="device-meta">
                         <div className="device-name">
                           {device.model ?? device.product ?? "Android"}
@@ -416,6 +431,7 @@ export default function App() {
           <div className="panel">
             {!selectedDevice ? (
               <div className="hero">
+                <img className="hero-logo" src={logoUrl} alt="Mirrox" draggable={false} />
                 <h2>Put your phone on your desktop</h2>
                 <p>
                   Mirror and control Android over USB or Wi‑Fi. The mirror uses a native system
@@ -503,12 +519,16 @@ export default function App() {
                         Demo {demoMode ? "on" : "off"}
                       </button>
                       <button
-                        className="btn"
+                        className={`btn ${isFullscreen ? "active-toggle" : ""}`}
                         disabled={!mirroring || busy}
                         onClick={() => void fullscreen()}
-                        title="Fullscreen mirror"
+                        title={
+                          isFullscreen
+                            ? "Exit fullscreen (Esc)"
+                            : "Fullscreen mirror (Esc to exit)"
+                        }
                       >
-                        Fullscreen
+                        {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
                       </button>
                     </div>
                   </div>

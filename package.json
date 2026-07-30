@@ -1,5 +1,5 @@
 {
-  "name": "vysor-clone",
+  "name": "mirrox",
   "version": "1.1.0",
   "private": true,
   "description": "Mirrox — Android device mirror and control desktop app",
@@ -8,12 +8,13 @@
     "packages/*"
   ],
   "scripts": {
-    "build:packages": "npm run build -w @vysor/adb && npm run build -w @vysor/mirror",
-    "dev": "npm run build:packages && npm run dev -w @vysor/desktop",
-    "build": "npm run build:packages && npm run build -w @vysor/desktop",
-    "package": "npm run vendor:arm64 && npm run build && npm run package -w @vysor/desktop",
-    "package:dmg": "npm run vendor:arm64 && npm run build && npm run package:dmg -w @vysor/desktop",
-    "package:intel": "npm run vendor:x64 && npm run build && npm run package:intel -w @vysor/desktop",
+    "postinstall": "node scripts/patch-electron-name.mjs",
+    "build:packages": "npm run build -w @mirrox/adb && npm run build -w @mirrox/mirror",
+    "dev": "npm run build:packages && npm run dev -w @mirrox/desktop",
+    "build": "npm run build:packages && npm run build -w @mirrox/desktop",
+    "package": "npm run vendor:arm64 && npm run build && npm run package -w @mirrox/desktop",
+    "package:dmg": "npm run vendor:arm64 && npm run build && npm run package:dmg -w @mirrox/desktop",
+    "package:intel": "npm run vendor:x64 && npm run build && npm run package:intel -w @mirrox/desktop",
     "package:all": "npm run package:dmg && npm run package:intel",
     "vendor": "node scripts/vendor-binaries.mjs",
     "vendor:arm64": "node scripts/vendor-binaries.mjs --arch=arm64",
@@ -21,5 +22,10 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "minimatch": "10.2.6",
+    "@electron/asar": "4.2.1"
   }
 }

@@ -10,6 +10,7 @@ interface DeviceInfo {
   product?: string;
   device?: string;
   mirroring?: boolean;
+  fullscreen?: boolean;
   audio?: boolean;
   recording?: boolean;
 }
@@ -20,11 +21,11 @@ interface FsEntry {
   isDirectory: boolean;
 }
 
-interface VysorApi {
+interface MirroxApi {
   listDevices: () => Promise<DeviceInfo[]>;
   startMirror: (serial: string) => Promise<{ ok: boolean }>;
   stopMirror: (serial: string) => Promise<{ ok: boolean }>;
-  fullscreenMirror: (serial: string) => Promise<{ ok: boolean }>;
+  fullscreenMirror: (serial: string) => Promise<{ ok: boolean; fullscreen: boolean }>;
   setShortcutTarget: (serial: string) => Promise<{ ok: boolean }>;
   listShortcuts: () => Promise<
     Array<{ action: string; label: string; accelerator: string }>
@@ -35,7 +36,12 @@ interface VysorApi {
   ) => Promise<{ ok: boolean; audio?: boolean }>;
   getDeviceSession: (
     serial: string
-  ) => Promise<{ serial: string; audio: boolean; mirroring: boolean }>;
+  ) => Promise<{
+    serial: string;
+    audio: boolean;
+    mirroring: boolean;
+    fullscreen: boolean;
+  }>;
   setDeviceScreen: (serial: string, on: boolean) => Promise<{ ok: boolean; on: boolean }>;
   getDeviceScreen: (serial: string) => Promise<{ on: boolean }>;
   setDemoMode: (
@@ -142,6 +148,6 @@ interface VysorApi {
 
 declare global {
   interface Window {
-    vysor: VysorApi;
+    mirrox: MirroxApi;
   }
 }

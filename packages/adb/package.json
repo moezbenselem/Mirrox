@@ -1,5 +1,5 @@
 {
-  "name": "@vysor/adb",
+  "name": "@mirrox/adb",
   "version": "1.1.0",
   "private": true,
   "main": "dist/index.js",

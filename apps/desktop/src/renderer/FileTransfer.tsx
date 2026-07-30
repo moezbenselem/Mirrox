@@ -66,7 +66,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
       setError(null);
       setSelected(new Set());
       try {
-        const result = await window.vysor.listFs(serial, nextPath);
+        const result = await window.mirrox.listFs(serial, nextPath);
         setPath(result.path);
         setEntries(result.entries);
       } catch (err) {
@@ -117,7 +117,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     if (!localPaths.length || disabled) return;
     setBusy(true);
     try {
-      const { results } = await window.vysor.uploadFs(serial, path, localPaths);
+      const { results } = await window.mirrox.uploadFs(serial, path, localPaths);
       const summary = results
         .map((r) => `${r.action}: ${r.localPath.split("/").pop()}`)
         .join("\n");
@@ -131,7 +131,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
   }
 
   async function onUpload() {
-    const paths = await window.vysor.pickUploadFiles();
+    const paths = await window.mirrox.pickUploadFiles();
     await uploadPaths(paths);
   }
 
@@ -202,7 +202,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
       setBusy(true);
       try {
         const remote = `${path.replace(/\/+$/, "")}/${name}`;
-        await window.vysor.mkdirFs(serial, remote);
+        await window.mirrox.mkdirFs(serial, remote);
         onToast("ok", `Created ${name}`);
         setDialog(null);
         await load(path);
@@ -226,7 +226,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
       }
       setBusy(true);
       try {
-        await window.vysor.renameFs(serial, dialog.item.path, trimmed);
+        await window.mirrox.renameFs(serial, dialog.item.path, trimmed);
         onToast("ok", `Renamed to ${trimmed}`);
         setDialog(null);
         await load(path);
@@ -241,7 +241,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     if (dialog.type === "delete") {
       setBusy(true);
       try {
-        await window.vysor.deleteFs(
+        await window.mirrox.deleteFs(
           serial,
           dialog.items.map((i) => ({ path: i.path, isDirectory: i.isDirectory }))
         );
@@ -261,7 +261,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     if (!target) return;
     setBusy(true);
     try {
-      const result = await window.vysor.duplicateFs(serial, {
+      const result = await window.mirrox.duplicateFs(serial, {
         path: target.path,
         isDirectory: target.isDirectory,
       });
@@ -280,7 +280,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     if (!files.length) return;
     setBusy(true);
     try {
-      const result = await window.vysor.downloadFs(
+      const result = await window.mirrox.downloadFs(
         serial,
         files.map((f) => f.path)
       );
@@ -289,7 +289,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
         "ok",
         `Downloaded ${result.results.length} file(s) to ${result.destDir}`
       );
-      if (result.destDir) void window.vysor.openPath(result.destDir);
+      if (result.destDir) void window.mirrox.openPath(result.destDir);
     } catch (err) {
       onToast("error", String(err));
     } finally {
@@ -311,7 +311,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     e.preventDefault();
     setDropActive(false);
     const paths = Array.from(e.dataTransfer.files)
-      .map((f) => window.vysor.getPathForFile(f))
+      .map((f) => window.mirrox.getPathForFile(f))
       .filter((p): p is string => Boolean(p));
     void uploadPaths(paths);
   }

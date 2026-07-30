@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import fs from "node:fs";
+import { prepareMacMirrorApp } from "./macAppBundle";
 
 export type QualityPreset = "low" | "medium" | "high";
 
@@ -18,6 +19,10 @@ export interface MirrorOptions {
   windowTitle?: string;
   fullscreen?: boolean;
   audio?: boolean;
+  /** Directory containing scrcpy.png (and optionally disconnected.png) */
+  iconDir?: string;
+  /** macOS .icns used for the transient dock .app wrapper */
+  iconIcnsPath?: string;
 }
 
 export interface QualityConfig {
@@ -56,6 +61,7 @@ export class MirrorSession extends EventEmitter {
   readonly serial: string;
   private process: ChildProcess | null = null;
   private options: MirrorOptions;
+  private stopping: Promise<void> | null = null;
 
   constructor(options: MirrorOptions) {
     super();
@@ -64,7 +70,11 @@ export class MirrorSession extends EventEmitter {
   }
 
   get running(): boolean {
-    return this.process !== null && !this.process.killed;
+    return this.process !== null && !this.process.killed && this.process.exitCode === null;
+  }
+
+  get fullscreen(): boolean {
+    return Boolean(this.options.fullscreen);
   }
 
   get windowTitle(): string {
@@ -121,6 +131,10 @@ export class MirrorSession extends EventEmitter {
       env.SCRCPY_SERVER_PATH = serverPath;
     }
 
+    if (this.options.iconDir && fs.existsSync(this.options.iconDir)) {
+      env.SCRCPY_ICON_DIR = this.options.iconDir;
+    }
+
     const libDir = path.join(path.dirname(scrcpyPath), "lib");
     if (fs.existsSync(libDir)) {
       const prev = env.DYLD_LIBRARY_PATH ? `${path.delimiter}${env.DYLD_LIBRARY_PATH}` : "";
@@ -131,7 +145,25 @@ export class MirrorSession extends EventEmitter {
       env.DYLD_FALLBACK_LIBRARY_PATH = `${libDir}${prevFb}`;
     }
 
-    const child = spawn(scrcpyPath, args, {
+    let launchPath = scrcpyPath;
+    if (process.platform === "darwin") {
+      try {
+        launchPath = prepareMacMirrorApp({
+          serial: this.serial,
+          title: this.windowTitle,
+          scrcpyPath,
+          iconIcnsPath: this.options.iconIcnsPath,
+          iconPngPath: this.options.iconDir
+            ? path.join(this.options.iconDir, "scrcpy.png")
+            : undefined,
+        });
+      } catch (err) {
+        this.emit("stderr", `macOS dock wrapper failed: ${String(err)}\n`);
+        launchPath = scrcpyPath;
+      }
+    }
+
+    const child = spawn(launchPath, args, {
       env,
       cwd: path.dirname(scrcpyPath),
       stdio: ["ignore", "pipe", "pipe"],
@@ -159,13 +191,43 @@ export class MirrorSession extends EventEmitter {
     this.emit("started");
   }
 
-  stop(): void {
-    if (!this.process) return;
-    this.process.kill("SIGTERM");
+  /** Kill the process and resolve once it has fully exited. */
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    if (!this.process) return Promise.resolve();
+
     const proc = this.process;
-    setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, 2000);
+    this.stopping = new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        this.process = null;
+        this.stopping = null;
+        resolve();
+      };
+
+      proc.once("exit", finish);
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        finish();
+        return;
+      }
+
+      setTimeout(() => {
+        if (settled) return;
+        try {
+          if (!proc.killed) proc.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        // Failsafe if the process never emits exit
+        setTimeout(finish, 500);
+      }, 1500);
+    });
+
+    return this.stopping;
   }
 }
 
@@ -186,6 +248,10 @@ export class MirrorManager extends EventEmitter {
     return this.sessions.get(serial)?.running ?? false;
   }
 
+  isFullscreen(serial: string): boolean {
+    return this.sessions.get(serial)?.fullscreen ?? false;
+  }
+
   getSession(serial: string): MirrorSession | undefined {
     return this.sessions.get(serial);
   }
@@ -201,10 +267,13 @@ export class MirrorManager extends EventEmitter {
 
     const session = new MirrorSession({ ...this.defaults, ...options });
     session.on("exit", (info) => {
+      // Only clear if this session is still the mapped one (avoids wiping a replacement).
+      if (this.sessions.get(options.serial) !== session) return;
       this.sessions.delete(options.serial);
       this.emit("session-exit", options.serial, info);
     });
     session.on("error", (err) => {
+      if (this.sessions.get(options.serial) !== session) return;
       this.emit("session-error", options.serial, err);
     });
     this.sessions.set(options.serial, session);
@@ -213,33 +282,34 @@ export class MirrorManager extends EventEmitter {
     return session;
   }
 
-  restart(serial: string, patch: Partial<MirrorOptions> = {}): MirrorSession {
+  async restart(serial: string, patch: Partial<MirrorOptions> = {}): Promise<MirrorSession> {
     const current = this.sessions.get(serial);
     const next: MirrorOptions = {
       serial,
       ...this.defaults,
+      fullscreen: current?.fullscreen,
       ...patch,
       windowTitle: patch.windowTitle ?? current?.windowTitle,
     };
     if (current) {
       current.removeAllListeners();
-      current.stop();
+      const stopPromise = current.stop();
       this.sessions.delete(serial);
+      await stopPromise;
     }
     return this.start(next);
   }
 
-  stop(serial: string): void {
+  async stop(serial: string): Promise<void> {
     const session = this.sessions.get(serial);
     if (!session) return;
-    session.stop();
+    session.removeAllListeners();
     this.sessions.delete(serial);
+    await session.stop();
   }
 
-  stopAll(): void {
-    for (const serial of [...this.sessions.keys()]) {
-      this.stop(serial);
-    }
+  async stopAll(): Promise<void> {
+    await Promise.all([...this.sessions.keys()].map((serial) => this.stop(serial)));
   }
 
   updateDefaults(partial: Partial<MirrorOptions>): void {

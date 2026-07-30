@@ -1,5 +1,5 @@
 {
-  "name": "@vysor/desktop",
+  "name": "@mirrox/desktop",
   "version": "1.1.0",
   "private": true,
   "description": "Mirrox desktop app",
@@ -18,14 +18,14 @@
     "prepackage:intel": "npm run vendor:x64 --prefix ../.."
   },
   "dependencies": {
-    "@vysor/adb": "*",
-    "@vysor/mirror": "*"
+    "@mirrox/adb": "*",
+    "@mirrox/mirror": "*"
   },
   "devDependencies": {
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^35.0.1",
+    "electron": "^39.8.10",
     "electron-builder": "^26.15.3",
     "electron-vite": "^3.0.0",
     "react": "^19.0.0",
@@ -36,44 +36,72 @@
   "build": {
     "appId": "com.mirrox.app",
     "productName": "Mirrox",
-    "electronVersion": "35.7.5",
+    "electronVersion": "39.8.10",
     "npmRebuild": false,
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
+    "icon": "build/icon.icns",
     "files": [
       "out/**/*",
       "package.json",
       {
         "from": "../../packages/adb/dist",
-        "to": "node_modules/@vysor/adb/dist",
-        "filter": ["**/*"]
+        "to": "node_modules/@mirrox/adb/dist",
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../../packages/adb/package.json",
-        "to": "node_modules/@vysor/adb/package.json"
+        "to": "node_modules/@mirrox/adb/package.json"
       },
       {
         "from": "../../packages/mirror/dist",
-        "to": "node_modules/@vysor/mirror/dist",
-        "filter": ["**/*"]
+        "to": "node_modules/@mirrox/mirror/dist",
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../../packages/mirror/package.json",
-        "to": "node_modules/@vysor/mirror/package.json"
+        "to": "node_modules/@mirrox/mirror/package.json"
       }
     ],
     "extraResources": [
       {
         "from": "../../vendor/bin",
         "to": "bin",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "build/icon.icns",
+        "to": "icon.icns"
+      },
+      {
+        "from": "resources/scrcpy-icons",
+        "to": "scrcpy-icons",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
+      "extendInfo": {
+        "CFBundleName": "Mirrox",
+        "CFBundleDisplayName": "Mirrox"
+      },
       "target": [
         "dmg",
         "dir"

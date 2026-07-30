@@ -10,6 +10,7 @@ export interface DeviceInfo {
   product?: string;
   device?: string;
   mirroring?: boolean;
+  fullscreen?: boolean;
   audio?: boolean;
   recording?: boolean;
 }
@@ -18,7 +19,11 @@ const api = {
   listDevices: (): Promise<DeviceInfo[]> => ipcRenderer.invoke("devices:list"),
   startMirror: (serial: string) => ipcRenderer.invoke("mirror:start", serial),
   stopMirror: (serial: string) => ipcRenderer.invoke("mirror:stop", serial),
-  fullscreenMirror: (serial: string) => ipcRenderer.invoke("mirror:fullscreen", serial),
+  fullscreenMirror: (serial: string) =>
+    ipcRenderer.invoke("mirror:fullscreen", serial) as Promise<{
+      ok: boolean;
+      fullscreen: boolean;
+    }>,
   setShortcutTarget: (serial: string) =>
     ipcRenderer.invoke("mirror:setShortcutTarget", serial),
   listShortcuts: () => ipcRenderer.invoke("shortcuts:list"),
@@ -109,6 +114,6 @@ const api = {
   },
 };
 
-contextBridge.exposeInMainWorld("vysor", api);
+contextBridge.exposeInMainWorld("mirrox", api);
 
-export type VysorApi = typeof api;
+export type MirroxApi = typeof api;

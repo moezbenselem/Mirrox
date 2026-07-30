@@ -11,8 +11,8 @@ import {
 import path from "node:path";
 import fs from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { AdbClient, shellQuote, type AdbDevice } from "@vysor/adb";
-import { MirrorManager, type QualityPreset } from "@vysor/mirror";
+import { AdbClient, shellQuote, type AdbDevice } from "@mirrox/adb";
+import { MirrorManager, type QualityPreset } from "@mirrox/mirror";
 import {
   MirrorShortcutManager,
   MIRROR_SHORTCUTS,
@@ -61,6 +61,56 @@ function resolveScrcpyServer(scrcpyPath: string): string | undefined {
   return undefined;
 }
 
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(process.resourcesPath, "icon.png"),
+    path.join(app.getAppPath(), "resources", "icon.png"),
+    path.join(__dirname, "../../resources/icon.png"),
+    path.join(__dirname, "../../build/icon.png"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
+function resolveAppIcnsPath(): string | undefined {
+  const candidates = [
+    path.join(process.resourcesPath, "icon.icns"),
+    path.join(app.getAppPath(), "build", "icon.icns"),
+    path.join(__dirname, "../../build/icon.icns"),
+    path.join(__dirname, "../../resources/icon.icns"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
+function resolveScrcpyIconDir(): string | undefined {
+  const candidates = [
+    path.join(process.resourcesPath, "scrcpy-icons"),
+    path.join(app.getAppPath(), "resources", "scrcpy-icons"),
+    path.join(__dirname, "../../resources/scrcpy-icons"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(path.join(candidate, "scrcpy.png"))) return candidate;
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let adb: AdbClient;
 let mirrors: MirrorManager;
@@ -71,11 +121,17 @@ let alwaysOnTop = false;
 let keepScreenOn = true;
 
 const audioBySerial = new Map<string, boolean>();
+const fullscreenBySerial = new Map<string, boolean>();
 const restartingSerials = new Set<string>();
 const recordings = new Map<
   string,
   { child: ChildProcess; remotePath: string; startedAt: number }
 >();
+
+function markRestarting(serial: string, ms = 3000): void {
+  restartingSerials.add(serial);
+  setTimeout(() => restartingSerials.delete(serial), ms);
+}
 
 function preloadPath(): string {
   return path.join(__dirname, "../preload/index.js");
@@ -90,6 +146,7 @@ function loadRenderer(win: BrowserWindow): void {
 }
 
 function createWindow(): void {
+  const iconPath = resolveAppIconPath();
   mainWindow = new BrowserWindow({
     width: 980,
     height: 680,
@@ -99,6 +156,7 @@ function createWindow(): void {
     backgroundColor: "#0f1115",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: preloadPath(),
       contextIsolation: true,
@@ -125,6 +183,45 @@ function resolveShortcutTarget(): string | null {
 
 function syncMirrorShortcuts(): void {
   mirrorShortcuts?.sync(mirrors.list().some((s) => mirrors.isRunning(s)));
+  syncEscapeExitFullscreen();
+}
+
+function syncEscapeExitFullscreen(): void {
+  const anyFullscreen = [...fullscreenBySerial.entries()].some(
+    ([serial, on]) => on && mirrors.isRunning(serial)
+  );
+  mirrorShortcuts?.syncEscapeExit(anyFullscreen);
+}
+
+async function setMirrorFullscreen(
+  serial: string,
+  fullscreen: boolean
+): Promise<{ ok: boolean; fullscreen: boolean }> {
+  if (!mirrors.isRunning(serial)) {
+    return { ok: false, fullscreen: false };
+  }
+  fullscreenBySerial.set(serial, fullscreen);
+  markRestarting(serial);
+  await mirrors.restart(serial, {
+    ...(await mirrorRestartPatch(serial)),
+    fullscreen,
+  });
+  syncEscapeExitFullscreen();
+  await refreshDevices();
+  return { ok: true, fullscreen };
+}
+
+async function exitFullscreenViaEscape(): Promise<void> {
+  const target =
+    (shortcutTarget && fullscreenBySerial.get(shortcutTarget)
+      ? shortcutTarget
+      : null) ??
+    [...fullscreenBySerial.entries()].find(
+      ([serial, on]) => on && mirrors.isRunning(serial)
+    )?.[0] ??
+    null;
+  if (!target) return;
+  await setMirrorFullscreen(target, false);
 }
 
 async function takeScreenshotInternal(serial: string): Promise<{
@@ -187,6 +284,7 @@ async function refreshDevices(): Promise<AdbDevice[]> {
   const withSessions = enriched.map((d) => ({
     ...d,
     mirroring: mirrors.isRunning(d.serial),
+    fullscreen: fullscreenBySerial.get(d.serial) ?? false,
     audio: audioBySerial.get(d.serial) ?? true,
     recording: recordings.has(d.serial),
   }));
@@ -194,9 +292,40 @@ async function refreshDevices(): Promise<AdbDevice[]> {
   return withSessions;
 }
 
-function startMirror(serial: string, fullscreen = false): void {
+function isWirelessSerial(serial: string): boolean {
+  // TCP/IP ADB: "192.168.1.10:5555" or mDNS / TLS connect ids
+  return /:\d+$/.test(serial) || /adb-tls-connect|_adb-tls-pairing/i.test(serial);
+}
+
+function connectionMethodLabel(serial: string): "Cable" | "Wireless" {
+  return isWirelessSerial(serial) ? "Wireless" : "Cable";
+}
+
+async function resolveDeviceDisplayName(serial: string): Promise<string> {
+  try {
+    const devices = await adb.listDevices();
+    const found = devices.find((d) => d.serial === serial);
+    if (found) {
+      const enriched = await adb.enrichDevice(found);
+      const name = enriched.model || enriched.product || enriched.device;
+      if (name) return name;
+    }
+  } catch {
+    /* fall through */
+  }
+  return serial;
+}
+
+async function mirrorWindowTitle(serial: string): Promise<string> {
+  const name = await resolveDeviceDisplayName(serial);
+  return `${name} — ${connectionMethodLabel(serial)}`;
+}
+
+async function startMirror(serial: string, fullscreen = false): Promise<void> {
+  if (mirrors.isRunning(serial)) return;
   const audio = audioBySerial.get(serial) ?? true;
   const scrcpyPath = resolveVendorBin("scrcpy");
+  fullscreenBySerial.set(serial, fullscreen);
   if (keepScreenOn) {
     void adb.setStayAwake(serial, true).catch(() => undefined);
   }
@@ -210,13 +339,15 @@ function startMirror(serial: string, fullscreen = false): void {
     adbPath: adb.adbPath,
     scrcpyPath,
     scrcpyServerPath: resolveScrcpyServer(scrcpyPath),
-    windowTitle: `Mirrox — ${serial}`,
+    iconDir: resolveScrcpyIconDir(),
+    iconIcnsPath: resolveAppIcnsPath(),
+    windowTitle: await mirrorWindowTitle(serial),
   });
   shortcutTarget = serial;
   syncMirrorShortcuts();
 }
 
-function mirrorRestartPatch(serial: string) {
+async function mirrorRestartPatch(serial: string) {
   const scrcpyPath = resolveVendorBin("scrcpy");
   return {
     serial,
@@ -224,19 +355,23 @@ function mirrorRestartPatch(serial: string) {
     alwaysOnTop,
     stayAwake: keepScreenOn,
     audio: audioBySerial.get(serial) ?? true,
+    fullscreen: fullscreenBySerial.get(serial) ?? false,
     adbPath: adb.adbPath,
     scrcpyPath,
     scrcpyServerPath: resolveScrcpyServer(scrcpyPath),
-    windowTitle: `Mirrox — ${serial}`,
+    iconDir: resolveScrcpyIconDir(),
+    iconIcnsPath: resolveAppIcnsPath(),
+    windowTitle: await mirrorWindowTitle(serial),
   };
 }
 
 function restartRunningMirrors(): void {
   for (const serial of mirrors.list()) {
     if (!mirrors.isRunning(serial)) continue;
-    restartingSerials.add(serial);
-    mirrors.restart(serial, mirrorRestartPatch(serial));
-    setTimeout(() => restartingSerials.delete(serial), 1000);
+    markRestarting(serial);
+    void (async () => {
+      await mirrors.restart(serial, await mirrorRestartPatch(serial));
+    })();
   }
 }
 
@@ -324,7 +459,7 @@ function registerIpc(): void {
   ipcMain.handle("devices:list", async () => refreshDevices());
 
   ipcMain.handle("mirror:start", async (_e, serial: string) => {
-    startMirror(serial, false);
+    await startMirror(serial, false);
     await refreshDevices();
     return { ok: true };
   });
@@ -333,7 +468,9 @@ function registerIpc(): void {
     if (recordings.has(serial)) {
       await stopRecordingInternal(serial).catch(() => undefined);
     }
-    mirrors.stop(serial);
+    markRestarting(serial);
+    await mirrors.stop(serial);
+    fullscreenBySerial.delete(serial);
     if (shortcutTarget === serial) {
       shortcutTarget = resolveShortcutTarget();
     }
@@ -350,23 +487,21 @@ function registerIpc(): void {
   ipcMain.handle("shortcuts:list", async () => MIRROR_SHORTCUTS);
 
   ipcMain.handle("mirror:fullscreen", async (_e, serial: string) => {
-    restartingSerials.add(serial);
-    mirrors.stop(serial);
-    startMirror(serial, true);
-    setTimeout(() => restartingSerials.delete(serial), 1000);
-    await refreshDevices();
-    return { ok: true };
+    if (!mirrors.isRunning(serial)) {
+      return { ok: false, fullscreen: false };
+    }
+    const next = !(fullscreenBySerial.get(serial) ?? false);
+    return setMirrorFullscreen(serial, next);
   });
 
   ipcMain.handle("device:setAudio", async (_e, serial: string, enabled: boolean) => {
     audioBySerial.set(serial, enabled);
     if (mirrors.isRunning(serial)) {
-      restartingSerials.add(serial);
-      mirrors.restart(serial, {
-        ...mirrorRestartPatch(serial),
+      markRestarting(serial);
+      await mirrors.restart(serial, {
+        ...(await mirrorRestartPatch(serial)),
         audio: enabled,
       });
-      setTimeout(() => restartingSerials.delete(serial), 1000);
     }
     await refreshDevices();
     return { ok: true, audio: enabled };
@@ -376,6 +511,7 @@ function registerIpc(): void {
     serial,
     audio: audioBySerial.get(serial) ?? true,
     mirroring: mirrors.isRunning(serial),
+    fullscreen: fullscreenBySerial.get(serial) ?? false,
   }));
 
   ipcMain.handle("device:setScreen", async (_e, serial: string, on: boolean) => {
@@ -636,6 +772,8 @@ function registerIpc(): void {
   });
 }
 
+app.setName("Mirrox");
+
 app.whenReady().then(() => {
   const adbPath = resolveVendorBin("adb");
   adb = new AdbClient({ adbPath, pollIntervalMs: 1500 });
@@ -649,6 +787,7 @@ app.whenReady().then(() => {
   mirrorShortcuts = new MirrorShortcutManager({
     getTargetSerial: resolveShortcutTarget,
     onAction: (action, serial) => handleMirrorShortcutAction(action, serial),
+    onExitFullscreen: () => exitFullscreenViaEscape(),
   });
 
   Menu.setApplicationMenu(
@@ -685,6 +824,7 @@ app.whenReady().then(() => {
   mirrors.on("session-exit", (serial) => {
     if (restartingSerials.has(serial)) return;
     void (async () => {
+      fullscreenBySerial.delete(serial);
       if (recordings.has(serial)) {
         await stopRecordingInternal(serial).catch(() => undefined);
       }
@@ -703,6 +843,15 @@ app.whenReady().then(() => {
 
   adb.startWatching();
 
+  const iconPath = resolveAppIconPath();
+  if (iconPath && process.platform === "darwin") {
+    try {
+      app.dock?.setIcon(nativeImage.createFromPath(iconPath));
+    } catch {
+      /* ignore */
+    }
+  }
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -718,5 +867,5 @@ app.on("before-quit", () => {
     void stopRecordingInternal(serial).catch(() => undefined);
   }
   adb?.stopWatching();
-  mirrors?.stopAll();
+  void mirrors?.stopAll();
 });

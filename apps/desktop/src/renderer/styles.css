@@ -54,6 +54,22 @@ select {
   -webkit-app-region: drag;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  object-fit: cover;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
 .titlebar h1 {
   margin: 0;
   font-size: 14px;
@@ -142,20 +158,11 @@ select {
 
 .device-icon {
   width: 36px;
-  height: 48px;
-  border-radius: 6px;
-  border: 2px solid #4a5568;
-  background: linear-gradient(160deg, #2a3344, #151a24);
-  position: relative;
+  height: 36px;
+  border-radius: 9px;
+  object-fit: cover;
   flex-shrink: 0;
-}
-
-.device-icon::after {
-  content: "";
-  position: absolute;
-  inset: 4px;
-  border-radius: 3px;
-  background: #0b0e14;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
 .device-meta {
@@ -247,6 +254,15 @@ select {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.hero-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  object-fit: cover;
+  margin-bottom: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
 .hero h2 {
