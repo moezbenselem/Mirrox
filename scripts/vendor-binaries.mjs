@@ -90,7 +90,16 @@ function ensureX64Prefix(cellar, prefix) {
   }
 }
 
+function rewriteStagingInstallName(dep, stagingRoot) {
+  const marker = `${path.sep}vendor${path.sep}staging-x64${path.sep}`;
+  const idx = dep.indexOf(marker);
+  if (idx === -1) return dep;
+  return path.join(stagingRoot, dep.slice(idx + marker.length));
+}
+
 function relocateHomebrewPlaceholders(cellar, prefix) {
+  const stagingRoot = path.dirname(prefix);
+  const stagingMarker = "/vendor/staging-x64/";
   const replacements = [
     ["@@HOMEBREW_PREFIX@@", prefix],
     ["@@HOMEBREW_CELLAR@@", cellar],
@@ -108,13 +117,16 @@ function relocateHomebrewPlaceholders(cellar, prefix) {
       spawnSync("otool", ["-L", file], { encoding: "utf8" }).stdout || "";
     const idOut = spawnSync("otool", ["-D", file], { encoding: "utf8" }).stdout || "";
     const needs =
-      replacements.some(([ph]) => libs.includes(ph) || idOut.includes(ph));
+      replacements.some(([ph]) => libs.includes(ph) || idOut.includes(ph)) ||
+      libs.includes(stagingMarker) ||
+      idOut.includes(stagingMarker);
     if (!needs) continue;
 
     const idLines = idOut.trim().split("\n");
     const curId = idLines.length >= 2 ? idLines[idLines.length - 1].trim() : "";
     let newId = curId;
     for (const [ph, to] of replacements) newId = newId.replaceAll(ph, to);
+    newId = rewriteStagingInstallName(newId, stagingRoot);
     if (newId !== curId && curId) {
       spawnSync("install_name_tool", ["-id", newId, file], { encoding: "utf8" });
       changes += 1;
@@ -124,6 +136,7 @@ function relocateHomebrewPlaceholders(cellar, prefix) {
       const dep = line.trim().split(/\s+/)[0];
       let next = dep;
       for (const [ph, to] of replacements) next = next.replaceAll(ph, to);
+      next = rewriteStagingInstallName(next, stagingRoot);
       if (next === dep) continue;
       const result = spawnSync("install_name_tool", ["-change", dep, next, file], {
         encoding: "utf8",
