@@ -2,7 +2,7 @@
 
 **Mirrox** is a macOS desktop app for mirroring and controlling Android phones over USB or Wi‑Fi. It wraps **ADB** and **scrcpy** in a focused Electron UI so you can view, click, type, transfer files, capture screenshots, and record — without juggling terminal commands.
 
-Current version: **1.1.0**
+Current version: **0.2.0**
 
 ---
 
@@ -55,8 +55,8 @@ After packaging:
 
 | Arch | Artifact |
 | --- | --- |
-| Apple Silicon | `apps/desktop/release/Mirrox-1.1.0-arm64.dmg` |
-| Intel | `apps/desktop/release/Mirrox-1.1.0.dmg` |
+| Apple Silicon | `apps/desktop/release/Mirrox-0.2.0-arm64.dmg` |
+| Intel | `apps/desktop/release/Mirrox-0.2.0.dmg` |
 
 Each DMG embeds matching-architecture `adb`, `scrcpy`, `scrcpy-server`, and required dylibs.
 
