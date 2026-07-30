@@ -63,8 +63,21 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     y: number;
     entry: FsEntry | null;
   }>(null);
+  const [fileInfo, setFileInfo] = useState<null | {
+    path: string;
+    name: string;
+    isDirectory: boolean;
+    size: number | null;
+    modifiedAt: number | null;
+    permissions: string | null;
+    owner: string | null;
+    group: string | null;
+    itemCount: number | null;
+    noPreview?: boolean;
+    tempPath?: string;
+  }>(null);
   const [filePreview, setFilePreview] = useState<null | {
-    kind: "image" | "text" | "unsupported";
+    kind: "image" | "text";
     name: string;
     remotePath: string;
     tempPath: string;
@@ -216,7 +229,7 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
 
     const pad = 8;
     const menuW = 180;
-    const menuH = entry ? 260 : 120;
+    const menuH = entry ? 300 : 120;
     const x = Math.min(e.clientX, window.innerWidth - menuW - pad);
     const y = Math.min(e.clientY, window.innerHeight - menuH - pad);
     setMenu({ x: Math.max(pad, x), y: Math.max(pad, y), entry });
@@ -318,18 +331,68 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     }
   }
 
+  async function onGetInfo(
+    item?: FsEntry,
+    opts?: { noPreview?: boolean; tempPath?: string }
+  ) {
+    const target = item ?? (selectedItems.length === 1 ? selectedItems[0] : null);
+    if (!target) return;
+    setBusy(true);
+    try {
+      const info = await window.mirrox.statFs(serial, target.path);
+      setFileInfo({
+        path: info.path,
+        name: info.name,
+        isDirectory: info.isDirectory,
+        size: info.size,
+        modifiedAt: info.modifiedAt,
+        permissions: info.permissions,
+        owner: info.owner,
+        group: info.group,
+        itemCount: info.itemCount,
+        noPreview: opts?.noPreview,
+        tempPath: opts?.tempPath,
+      });
+    } catch (err) {
+      if (opts?.tempPath) void window.mirrox.discardPreview(opts.tempPath);
+      onToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onPreview(item?: FsEntry) {
     const target = item ?? (selectedItems.length === 1 ? selectedItems[0] : null);
     if (!target || target.isDirectory) return;
     setBusy(true);
     try {
       const result = await window.mirrox.previewFs(serial, target.path);
-      setFilePreview(result);
+      if (result.kind === "unsupported") {
+        setBusy(false);
+        await onGetInfo(target, { noPreview: true, tempPath: result.tempPath });
+        return;
+      }
+      setFilePreview({
+        kind: result.kind,
+        name: result.name,
+        remotePath: result.remotePath,
+        tempPath: result.tempPath,
+        size: result.size,
+        dataUrl: result.dataUrl,
+        text: result.text,
+      });
     } catch (err) {
       onToast("error", String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  function closeFileInfo() {
+    if (fileInfo?.tempPath) {
+      void window.mirrox.discardPreview(fileInfo.tempPath);
+    }
+    setFileInfo(null);
   }
 
   async function closeFilePreview() {
@@ -344,11 +407,26 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
     await window.mirrox.openPath(filePreview.tempPath);
   }
 
+  async function openInfoExternally() {
+    if (!fileInfo?.tempPath) return;
+    await window.mirrox.openPath(fileInfo.tempPath);
+  }
+
   function formatBytes(n: number): string {
-    if (!n || n < 0) return "";
+    if (n < 0 || !Number.isFinite(n)) return "—";
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  function formatModified(ms: number | null): string {
+    if (ms == null || !Number.isFinite(ms)) return "—";
+    try {
+      return new Date(ms).toLocaleString();
+    } catch {
+      return "—";
+    }
   }
 
   async function onDownloadItems(items: FsEntry[]) {
@@ -669,6 +747,17 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
                     >
                       Duplicate
                     </button>
+                    <button
+                      type="button"
+                      className="fs-menu-item"
+                      role="menuitem"
+                      onClick={() => {
+                        closeMenu();
+                        void onGetInfo(menuSingle);
+                      }}
+                    >
+                      Get Info
+                    </button>
                   </>
                 )}
                 <div className="fs-menu-sep" />
@@ -788,6 +877,103 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
         </div>
       )}
 
+      {fileInfo && (
+        <div className="fs-dialog-backdrop" onClick={() => !busy && closeFileInfo()}>
+          <div
+            className="fs-dialog fs-info-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={fileInfo.noPreview ? "Can't preview" : "Get Info"}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeFileInfo();
+            }}
+          >
+            <h4>{fileInfo.noPreview ? "Can't preview" : "Get Info"}</h4>
+            {fileInfo.noPreview && (
+              <p className="fs-dialog-body">No in-app preview for this file type.</p>
+            )}
+            <dl className="fs-info-grid">
+              <div className="fs-info-row">
+                <dt>Name</dt>
+                <dd>{fileInfo.name}</dd>
+              </div>
+              <div className="fs-info-row">
+                <dt>Kind</dt>
+                <dd>{fileInfo.isDirectory ? "Folder" : "File"}</dd>
+              </div>
+              <div className="fs-info-row">
+                <dt>Path</dt>
+                <dd className="fs-info-path">{fileInfo.path}</dd>
+              </div>
+              <div className="fs-info-row">
+                <dt>Size</dt>
+                <dd>
+                  {fileInfo.size != null ? formatBytes(fileInfo.size) : "—"}
+                  {fileInfo.isDirectory && fileInfo.itemCount != null
+                    ? ` · ${fileInfo.itemCount} item${fileInfo.itemCount === 1 ? "" : "s"}`
+                    : ""}
+                </dd>
+              </div>
+              <div className="fs-info-row">
+                <dt>Modified</dt>
+                <dd>{formatModified(fileInfo.modifiedAt)}</dd>
+              </div>
+              {fileInfo.permissions && (
+                <div className="fs-info-row">
+                  <dt>Permissions</dt>
+                  <dd>{fileInfo.permissions}</dd>
+                </div>
+              )}
+              {(fileInfo.owner || fileInfo.group) && (
+                <div className="fs-info-row">
+                  <dt>Owner</dt>
+                  <dd>
+                    {[fileInfo.owner, fileInfo.group].filter(Boolean).join(" : ")}
+                  </dd>
+                </div>
+              )}
+            </dl>
+            <div className="fs-dialog-actions">
+              {fileInfo.noPreview && !fileInfo.isDirectory && (
+                <>
+                  <button
+                    className="btn primary"
+                    disabled={busy}
+                    onClick={() => {
+                      void onDownloadItems([
+                        {
+                          name: fileInfo.name,
+                          path: fileInfo.path,
+                          isDirectory: false,
+                        },
+                      ]);
+                    }}
+                  >
+                    Download…
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={busy || !fileInfo.tempPath}
+                    onClick={() => void openInfoExternally()}
+                  >
+                    Open externally
+                  </button>
+                </>
+              )}
+              <button
+                className={`btn ${fileInfo.noPreview ? "" : "primary"}`}
+                disabled={busy}
+                autoFocus
+                onClick={closeFileInfo}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {filePreview && (
         <div className="modal-backdrop" onClick={() => void closeFilePreview()}>
           <div
@@ -813,12 +999,6 @@ export default function FileTransfer({ serial, disabled, onToast }: Props) {
               )}
               {filePreview.kind === "text" && (
                 <pre className="file-preview-text">{filePreview.text}</pre>
-              )}
-              {filePreview.kind === "unsupported" && (
-                <div className="file-preview-unsupported">
-                  <p>No in-app preview for this file type.</p>
-                  <p>Open it with a system app, or download it to keep a copy.</p>
-                </div>
               )}
             </div>
             <div className="modal-actions">

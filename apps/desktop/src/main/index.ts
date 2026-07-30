@@ -182,7 +182,13 @@ const fullscreenBySerial = new Map<string, boolean>();
 const restartingSerials = new Set<string>();
 const recordings = new Map<
   string,
-  { child: ChildProcess; remotePath: string; startedAt: number }
+  | {
+      kind: "display";
+      child: ReturnType<AdbClient["startScreenrecord"]>;
+      remotePath: string;
+      startedAt: number;
+    }
+  | { kind: "camera"; localPath: string; startedAt: number }
 >();
 let activeTransfer: ChildProcess | null = null;
 
@@ -258,6 +264,7 @@ async function setMirrorFullscreen(
   if (!mirrors.isRunning(serial)) {
     return { ok: false, fullscreen: false };
   }
+  await discardCameraRecordingIfNeeded(serial);
   fullscreenBySerial.set(serial, fullscreen);
   markRestarting(serial);
   await mirrors.restart(serial, {
@@ -291,7 +298,13 @@ async function takeScreenshotInternal(serial: string): Promise<{
     app.getPath("temp"),
     `mirrox-shot-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.png`
   );
-  await adb.screencap(serial, tempPath);
+
+  if ((videoSourceBySerial.get(serial) ?? "display") === "camera") {
+    await captureCameraPhoto(serial, tempPath);
+  } else {
+    await adb.screencap(serial, tempPath);
+  }
+
   let copiedToClipboard = false;
   if (screenshotCopyToClipboard) {
     const image = nativeImage.createFromPath(tempPath);
@@ -308,14 +321,124 @@ async function takeScreenshotInternal(serial: string): Promise<{
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function extractVideoFrame(videoPath: string, outPngPath: string): Promise<void> {
+  const ffmpeg = resolveVendorBin("ffmpeg");
+  const attempts: string[][] = [
+    ["-y", "-ss", "0.4", "-i", videoPath, "-frames:v", "1", "-q:v", "2", outPngPath],
+    ["-y", "-i", videoPath, "-frames:v", "1", "-q:v", "2", outPngPath],
+  ];
+  let lastError = "Could not extract photo from camera recording";
+  for (const args of attempts) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(ffmpeg, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0 && fs.existsSync(outPngPath) && fs.statSync(outPngPath).size > 0) {
+            resolve();
+          } else {
+            reject(new Error(stderr.trim() || `ffmpeg exited with code ${code ?? "unknown"}`));
+          }
+        });
+      });
+      return;
+    } catch (err) {
+      lastError = String(err);
+    }
+  }
+  throw new Error(lastError);
+}
+
+/** Capture one camera frame via a short mirror --record, then restore the preview. */
+async function captureCameraPhoto(serial: string, outPngPath: string): Promise<void> {
+  if (recordings.get(serial)?.kind === "camera") {
+    throw new Error("Stop recording before taking a photo");
+  }
+
+  const wasRunning = mirrors.isRunning(serial);
+  const wasFullscreen = fullscreenBySerial.get(serial) ?? false;
+  const tempMp4 = path.join(
+    app.getPath("temp"),
+    `mirrox-cam-shot-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.mp4`
+  );
+
+  markRestarting(serial, 12_000);
+  try {
+    if (wasRunning) {
+      await mirrors.stop(serial);
+    }
+
+    mirrors.start({
+      ...(await mirrorRestartPatch(serial)),
+      fullscreen: false,
+      recordPath: tempMp4,
+      // Avoid flashing a window during the brief capture burst.
+      noWindow: true,
+      noPlayback: true,
+    });
+
+    // Wait for encoder to produce a few frames before finalizing.
+    await sleep(1100);
+    await mirrors.stop(serial);
+
+    if (!fs.existsSync(tempMp4) || fs.statSync(tempMp4).size < 1024) {
+      throw new Error("Camera photo failed — open the camera mirror and try again");
+    }
+
+    await extractVideoFrame(tempMp4, outPngPath);
+  } finally {
+    discardTempFile(tempMp4);
+    if (wasRunning && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+      markRestarting(serial);
+      try {
+        await startMirror(serial, wasFullscreen);
+      } catch {
+        /* preview restore best-effort */
+      }
+    }
+  }
+}
+
 async function startRecordingInternal(serial: string): Promise<{ already: boolean }> {
   if (recordings.has(serial)) return { already: true };
+
+  if ((videoSourceBySerial.get(serial) ?? "display") === "camera") {
+    const localPath = path.join(
+      app.getPath("temp"),
+      `mirrox-rec-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.mp4`
+    );
+    const wasFullscreen = fullscreenBySerial.get(serial) ?? false;
+    const patch = {
+      ...(await mirrorRestartPatch(serial)),
+      recordPath: localPath,
+    };
+    markRestarting(serial, 8000);
+    if (mirrors.isRunning(serial)) {
+      await mirrors.restart(serial, patch);
+    } else {
+      fullscreenBySerial.set(serial, wasFullscreen);
+      mirrors.start({ ...patch, fullscreen: wasFullscreen });
+      shortcutTarget = serial;
+      syncMirrorShortcuts();
+    }
+    recordings.set(serial, { kind: "camera", localPath, startedAt: Date.now() });
+    return { already: false };
+  }
+
   const remotePath = `/sdcard/Download/mirrox-rec-${Date.now()}.mp4`;
   const child = adb.startScreenrecord(serial, remotePath);
-  recordings.set(serial, { child, remotePath, startedAt: Date.now() });
+  recordings.set(serial, { kind: "display", child, remotePath, startedAt: Date.now() });
   child.once("exit", () => {
     const current = recordings.get(serial);
-    if (current?.child === child) recordings.delete(serial);
+    if (current?.kind === "display" && current.child === child) recordings.delete(serial);
   });
   return { already: false };
 }
@@ -470,8 +593,9 @@ async function mirrorRestartPatch(serial: string) {
 function restartRunningMirrors(): void {
   for (const serial of mirrors.list()) {
     if (!mirrors.isRunning(serial)) continue;
-    markRestarting(serial);
     void (async () => {
+      await discardCameraRecordingIfNeeded(serial);
+      markRestarting(serial);
       await mirrors.restart(serial, await mirrorRestartPatch(serial));
     })();
   }
@@ -479,7 +603,7 @@ function restartRunningMirrors(): void {
 
 async function stopRecordingInternal(
   serial: string,
-  opts?: { discard?: boolean }
+  opts?: { discard?: boolean; resumeMirror?: boolean }
 ): Promise<{
   ok: boolean;
   saved?: boolean;
@@ -493,6 +617,47 @@ async function stopRecordingInternal(
   if (!active) return { ok: true, saved: false };
 
   recordings.delete(serial);
+
+  if (active.kind === "camera") {
+    const resumeMirror = opts?.resumeMirror !== false;
+    const wasFullscreen = fullscreenBySerial.get(serial) ?? false;
+
+    if (mirrors.isRunning(serial)) {
+      markRestarting(serial, 8000);
+      await mirrors.stop(serial);
+      // Give the muxer a moment to flush the MP4.
+      await sleep(300);
+    }
+
+    const tempPath = active.localPath;
+    if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size < 1024) {
+      discardTempFile(tempPath);
+      if (resumeMirror && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        markRestarting(serial);
+        await startMirror(serial, wasFullscreen).catch(() => undefined);
+      }
+      throw new Error(
+        "Recording file looks empty or corrupt. Record for a few seconds, then stop."
+      );
+    }
+
+    if (opts?.discard) {
+      discardTempFile(tempPath);
+      if (resumeMirror && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        markRestarting(serial);
+        await startMirror(serial, wasFullscreen).catch(() => undefined);
+      }
+      return { ok: true, saved: false, discarded: true };
+    }
+
+    if (resumeMirror && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+      markRestarting(serial);
+      await startMirror(serial, wasFullscreen).catch(() => undefined);
+    }
+
+    return { ok: true, saved: false, tempPath, serial };
+  }
+
   await adb.stopScreenrecordProcess(serial, active.child);
 
   // Wait until remote size stops growing (finalization can lag slightly).
@@ -509,7 +674,7 @@ async function stopRecordingInternal(
     } catch {
       /* ignore */
     }
-    await new Promise((r) => setTimeout(r, 200));
+    await sleep(200);
   }
   if (!Number.isFinite(lastSize) || lastSize < 1024) {
     throw new Error(
@@ -549,6 +714,14 @@ async function stopRecordingInternal(
   }
 
   return { ok: true, saved: false, tempPath, serial };
+}
+
+/** Drop in-progress camera --record before a settings restart (file would be truncated). */
+async function discardCameraRecordingIfNeeded(serial: string): Promise<void> {
+  if (recordings.get(serial)?.kind !== "camera") return;
+  await stopRecordingInternal(serial, { discard: true, resumeMirror: false }).catch(
+    () => undefined
+  );
 }
 
 async function saveRecordingInternal(
@@ -612,7 +785,9 @@ function registerIpc(): void {
 
   ipcMain.handle("mirror:stop", async (_e, serial: string) => {
     if (recordings.has(serial)) {
-      await stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
+      await stopRecordingInternal(serial, { discard: true, resumeMirror: false }).catch(
+        () => undefined
+      );
     }
     markRestarting(serial);
     await mirrors.stop(serial);
@@ -643,6 +818,7 @@ function registerIpc(): void {
   ipcMain.handle("device:setAudio", async (_e, serial: string, enabled: boolean) => {
     audioBySerial.set(serial, enabled);
     if (mirrors.isRunning(serial)) {
+      await discardCameraRecordingIfNeeded(serial);
       markRestarting(serial);
       await mirrors.restart(serial, {
         ...(await mirrorRestartPatch(serial)),
@@ -667,6 +843,7 @@ function registerIpc(): void {
   ipcMain.handle("device:setClipboard", async (_e, serial: string, enabled: boolean) => {
     clipboardBySerial.set(serial, enabled);
     if (mirrors.isRunning(serial)) {
+      await discardCameraRecordingIfNeeded(serial);
       markRestarting(serial);
       await mirrors.restart(serial, {
         ...(await mirrorRestartPatch(serial)),
@@ -682,6 +859,7 @@ function registerIpc(): void {
     async (_e, serial: string, source: VideoSource) => {
       videoSourceBySerial.set(serial, source);
       if (mirrors.isRunning(serial)) {
+        await discardCameraRecordingIfNeeded(serial);
         markRestarting(serial);
         await mirrors.restart(serial, await mirrorRestartPatch(serial));
       }
@@ -695,6 +873,7 @@ function registerIpc(): void {
     async (_e, serial: string, facing: CameraFacing) => {
       cameraFacingBySerial.set(serial, facing);
       if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        await discardCameraRecordingIfNeeded(serial);
         markRestarting(serial);
         await mirrors.restart(serial, await mirrorRestartPatch(serial));
       }
@@ -707,6 +886,7 @@ function registerIpc(): void {
     if (cameraId) cameraIdBySerial.set(serial, cameraId);
     else cameraIdBySerial.delete(serial);
     if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+      await discardCameraRecordingIfNeeded(serial);
       markRestarting(serial);
       await mirrors.restart(serial, await mirrorRestartPatch(serial));
     }
@@ -723,6 +903,7 @@ function registerIpc(): void {
       }
       orientationBySerial.set(serial, orientation);
       if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        await discardCameraRecordingIfNeeded(serial);
         markRestarting(serial);
         await mirrors.restart(serial, await mirrorRestartPatch(serial));
       }
@@ -1445,6 +1626,11 @@ function registerIpc(): void {
     return { ok: true };
   });
 
+  ipcMain.handle("fs:stat", async (_e, serial: string, remotePath: string) => {
+    const info = await adb.stat(serial, remotePath);
+    return { ok: true, ...info };
+  });
+
   ipcMain.handle(
     "fs:delete",
     async (
@@ -1748,7 +1934,9 @@ app.whenReady().then(() => {
     void (async () => {
       fullscreenBySerial.delete(serial);
       if (recordings.has(serial)) {
-        await stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
+        await stopRecordingInternal(serial, { discard: true, resumeMirror: false }).catch(
+          () => undefined
+        );
       }
       if (shortcutTarget === serial) {
         shortcutTarget = resolveShortcutTarget();
@@ -1786,7 +1974,9 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   mirrorShortcuts?.dispose();
   for (const serial of [...recordings.keys()]) {
-    void stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
+    void stopRecordingInternal(serial, { discard: true, resumeMirror: false }).catch(
+      () => undefined
+    );
   }
   adb?.stopWatching();
   void mirrors?.stopAll();

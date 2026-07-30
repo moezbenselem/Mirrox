@@ -135,6 +135,8 @@ const api = {
   discardPreview: (tempPath: string) => ipcRenderer.invoke("fs:discardPreview", tempPath),
   mkdirFs: (serial: string, remotePath: string) =>
     ipcRenderer.invoke("fs:mkdir", serial, remotePath),
+  statFs: (serial: string, remotePath: string) =>
+    ipcRenderer.invoke("fs:stat", serial, remotePath),
   deleteFs: (
     serial: string,
     items: Array<{ path: string; isDirectory: boolean }>

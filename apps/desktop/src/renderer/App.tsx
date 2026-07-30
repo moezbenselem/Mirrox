@@ -155,7 +155,13 @@ function MediaFrameControls({
   );
 }
 
-function MirrorShortcuts({ navBarEnabled }: { navBarEnabled: boolean }) {
+function MirrorShortcuts({
+  navBarEnabled,
+  videoSource,
+}: {
+  navBarEnabled: boolean;
+  videoSource: VideoSource;
+}) {
   return (
     <div className="card mirror-shortcuts">
       <h3>Mirror shortcuts</h3>
@@ -168,7 +174,9 @@ function MirrorShortcuts({ navBarEnabled }: { navBarEnabled: boolean }) {
       <div className="shortcut-grid">
         {MIRROR_SHORTCUTS.map((s) => (
           <div className="shortcut-row" key={s.action}>
-            <span className="shortcut-label">{s.label}</span>
+            <span className="shortcut-label">
+              {s.action === "screenshot" && videoSource === "camera" ? "Photo" : s.label}
+            </span>
             <kbd className="shortcut-key">{formatAccelerator(s.accelerator)}</kbd>
           </div>
         ))}
@@ -336,7 +344,7 @@ export default function App() {
           };
           if (p.path && p.dataUrl) {
             setPreview({ path: p.path, dataUrl: p.dataUrl, serial });
-            if (p.copiedToClipboard) showToast("ok", "Screenshot copied to clipboard");
+            if (p.copiedToClipboard) showToast("ok", "Copied to clipboard");
           }
           return;
         }
@@ -522,7 +530,7 @@ export default function App() {
           serial: selectedDevice.serial,
         });
         if (result.copiedToClipboard) {
-          showToast("ok", "Screenshot copied to clipboard");
+          showToast("ok", videoSource === "camera" ? "Photo copied to clipboard" : "Screenshot copied to clipboard");
         }
       }
     } catch (err) {
@@ -963,7 +971,7 @@ export default function App() {
                     {selectedDevice.state === "unauthorized"
                       ? "Unauthorized — unlock the phone and allow USB debugging."
                       : mirroring
-                        ? `Native mirror window is open${videoSource === "camera" ? " (camera)" : ""}. Shortcuts: ${formatAccelerator("CommandOrControl+Shift+S")} screenshot, ${formatAccelerator("CommandOrControl+Shift+R")} record.`
+                        ? `Native mirror window is open${videoSource === "camera" ? " (camera)" : ""}. Shortcuts: ${formatAccelerator("CommandOrControl+Shift+S")} ${videoSource === "camera" ? "photo" : "screenshot"}, ${formatAccelerator("CommandOrControl+Shift+R")} record.`
                         : "Ready to mirror. Click View to open a native mirror window."}
                   </p>
                 </div>
@@ -1123,15 +1131,15 @@ export default function App() {
                           className="btn"
                           disabled={busy}
                           onClick={() => void screenshot()}
-                          title={`Screenshot (${formatAccelerator("CommandOrControl+Shift+S")})`}
+                          title={`${videoSource === "camera" ? "Photo" : "Screenshot"} (${formatAccelerator("CommandOrControl+Shift+S")})`}
                         >
-                          Screenshot
+                          {videoSource === "camera" ? "Photo" : "Screenshot"}
                         </button>
                         <button
                           className={`btn ${recording ? "danger" : ""}`}
                           disabled={busy}
                           onClick={() => void toggleRecord()}
-                          title={`Record (${formatAccelerator("CommandOrControl+Shift+R")})`}
+                          title={`${recording ? "Stop record" : videoSource === "camera" ? "Record video" : "Record"} (${formatAccelerator("CommandOrControl+Shift+R")})`}
                         >
                           {recording ? "Stop record" : "Record"}
                         </button>
@@ -1225,7 +1233,9 @@ export default function App() {
                   </div>
                 )}
 
-                {canControl && mirroring && <MirrorShortcuts navBarEnabled={navBarEnabled} />}
+                {canControl && mirroring && (
+                  <MirrorShortcuts navBarEnabled={navBarEnabled} videoSource={videoSource} />
+                )}
 
                 {canControl && (
                   <FileTransfer serial={selectedDevice.serial} disabled={busy} onToast={showToast} />
@@ -1281,7 +1291,7 @@ export default function App() {
             aria-label="Screenshot preview"
           >
             <div className="modal-header">
-              <h3>Screenshot</h3>
+              <h3>{videoSource === "camera" ? "Photo" : "Screenshot"}</h3>
               <button className="btn" onClick={() => void closePreview()} disabled={busy}>
                 Close
               </button>

@@ -60,6 +60,18 @@ export interface AdbFsEntry {
   isDirectory: boolean;
 }
 
+export interface AdbFsStat {
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  size: number | null;
+  modifiedAt: number | null;
+  permissions: string | null;
+  owner: string | null;
+  group: string | null;
+  itemCount: number | null;
+}
+
 export interface AdbClientOptions {
   adbPath?: string;
   pollIntervalMs?: number;
@@ -772,6 +784,62 @@ export class AdbClient extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  async stat(serial: string, remotePath: string): Promise<AdbFsStat> {
+    const target = remotePath.replace(/\/+$/, "") || "/";
+    const name = target === "/" ? "/" : target.slice(target.lastIndexOf("/") + 1);
+    const q = shellQuote(target);
+
+    let stdout = "";
+    try {
+      // size|mtime|mode|owner|group|type|linkcount  (toybox/GNU stat)
+      ({ stdout } = await this.shell(
+        `stat -c '%s|%Y|%a|%U|%G|%F|%h' -- ${q} 2>/dev/null || stat -c '%s|%Y|%a|%U|%G|%F|%h' ${q}`,
+        serial
+      ));
+    } catch {
+      throw new Error("Could not read file info");
+    }
+
+    const line = stdout.trim().split("\n").find((l) => l.includes("|")) ?? stdout.trim();
+    const parts = line.split("|");
+    if (parts.length < 6) {
+      throw new Error("Could not parse file info");
+    }
+
+    const [sizeRaw, mtimeRaw, mode, owner, group, typeRaw, linkRaw] = parts;
+    const typeLower = (typeRaw ?? "").toLowerCase();
+    const isDirectory =
+      typeLower.includes("directory") ||
+      typeLower === "dir" ||
+      target.endsWith("/");
+
+    const sizeNum = Number.parseInt(sizeRaw, 10);
+    const mtimeNum = Number.parseInt(mtimeRaw, 10);
+    const linkNum = linkRaw != null ? Number.parseInt(linkRaw, 10) : NaN;
+
+    let itemCount: number | null = null;
+    if (isDirectory) {
+      try {
+        const listed = await this.listDir(serial, target);
+        itemCount = listed.length;
+      } catch {
+        itemCount = Number.isFinite(linkNum) && linkNum > 0 ? Math.max(0, linkNum - 2) : null;
+      }
+    }
+
+    return {
+      path: target,
+      name,
+      isDirectory,
+      size: Number.isFinite(sizeNum) ? sizeNum : null,
+      modifiedAt: Number.isFinite(mtimeNum) ? mtimeNum * 1000 : null,
+      permissions: mode?.trim() || null,
+      owner: owner?.trim() || null,
+      group: group?.trim() || null,
+      itemCount,
+    };
   }
 
   async uniqueCopyPath(serial: string, remotePath: string): Promise<string> {

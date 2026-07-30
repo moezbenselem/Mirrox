@@ -31,6 +31,12 @@ export interface MirrorOptions {
   cameraId?: string;
   /** Display + record orientation (0 / 90 / 180 / 270). */
   orientation?: OrientationDegrees;
+  /** When set, record the mirrored stream (display or camera) to this local path. */
+  recordPath?: string;
+  /** Hide the mirror window (useful for one-shot camera photo capture). */
+  noWindow?: boolean;
+  /** Disable video/audio playback while still recording. */
+  noPlayback?: boolean;
   /** Directory containing scrcpy.png (and optionally disconnected.png) */
   iconDir?: string;
   /** macOS .icns used for the transient dock .app wrapper */
@@ -153,6 +159,12 @@ export class MirrorSession extends EventEmitter {
     if (orientation !== 0) {
       args.push(`--orientation=${orientation}`);
     }
+
+    if (this.options.recordPath) {
+      args.push(`--record=${this.options.recordPath}`);
+    }
+    if (this.options.noWindow) args.push("--no-window");
+    if (this.options.noPlayback) args.push("--no-playback");
 
     const env = { ...process.env };
     if (this.options.adbPath) {

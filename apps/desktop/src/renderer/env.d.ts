@@ -275,6 +275,21 @@ interface MirroxApi {
   }>;
   discardPreview: (tempPath: string) => Promise<{ ok: boolean }>;
   mkdirFs: (serial: string, remotePath: string) => Promise<{ ok: boolean }>;
+  statFs: (
+    serial: string,
+    remotePath: string
+  ) => Promise<{
+    ok: boolean;
+    path: string;
+    name: string;
+    isDirectory: boolean;
+    size: number | null;
+    modifiedAt: number | null;
+    permissions: string | null;
+    owner: string | null;
+    group: string | null;
+    itemCount: number | null;
+  }>;
   deleteFs: (
     serial: string,
     items: Array<{ path: string; isDirectory: boolean }>
