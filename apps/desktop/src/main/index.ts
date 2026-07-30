@@ -24,6 +24,13 @@ import {
   type MirrorShortcutAction,
 } from "./mirrorShortcuts";
 import { loadSettings, saveSettings } from "./settings";
+import {
+  clearStoredMediaFrame,
+  compositeWithActiveFrame,
+  installMediaFrame,
+  listBuiltinFrames,
+  loadActiveMediaFrame,
+} from "./mediaFrame";
 
 function resolveVendorBin(name: string): string {
   const packaged = path.join(process.resourcesPath, "bin", name);
@@ -128,6 +135,9 @@ let keepScreenOn = true;
 let navBarEnabled = false;
 let clipboardAutosyncDefault = true;
 let screenshotCopyToClipboard = false;
+let mediaFrameApplyDefault = false;
+let mediaFrameId: string | null = null;
+let mediaFrameFitMode: "media-to-frame" | "frame-to-media" = "media-to-frame";
 let onboardingDismissed = false;
 let updateBannerDismissedVersion: string | null = null;
 
@@ -431,11 +441,17 @@ function restartRunningMirrors(): void {
   }
 }
 
-async function stopRecordingInternal(serial: string): Promise<{
+async function stopRecordingInternal(
+  serial: string,
+  opts?: { discard?: boolean }
+): Promise<{
   ok: boolean;
   saved?: boolean;
   path?: string;
+  tempPath?: string;
+  serial?: string;
   canceled?: boolean;
+  discarded?: boolean;
 }> {
   const active = recordings.get(serial);
   if (!active) return { ok: true, saved: false };
@@ -467,7 +483,7 @@ async function stopRecordingInternal(serial: string): Promise<{
 
   const tempPath = path.join(
     app.getPath("temp"),
-    `mirrox-rec-${serial.replace(/[^\w.-]/g, "_")}-${Date.now()}.mp4`
+    `mirrox-rec-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.mp4`
   );
 
   try {
@@ -487,28 +503,66 @@ async function stopRecordingInternal(serial: string): Promise<{
     throw new Error("Pulled recording is too small — device may not have finalized the MP4.");
   }
 
-  const { canceled, filePath } = await dialog.showSaveDialog({
-    title: "Save recording",
-    defaultPath: path.join(app.getPath("videos"), `mirrox-${serial}-${Date.now()}.mp4`),
-    filters: [{ name: "MP4", extensions: ["mp4"] }],
-  });
-
-  if (canceled || !filePath) {
+  if (opts?.discard) {
     try {
       fs.unlinkSync(tempPath);
     } catch {
       /* ignore */
     }
-    return { ok: true, saved: false, canceled: true };
+    return { ok: true, saved: false, discarded: true };
   }
 
-  fs.copyFileSync(tempPath, filePath);
+  return { ok: true, saved: false, tempPath, serial };
+}
+
+async function saveRecordingInternal(
+  tempPath: string,
+  serial: string,
+  applyFrame: boolean
+): Promise<{ ok: boolean; saved?: boolean; path?: string; canceled?: boolean }> {
+  if (!tempPath || !fs.existsSync(tempPath)) {
+    throw new Error("Recording file missing");
+  }
+
+  let sourcePath = tempPath;
+  let framedPath: string | null = null;
+  try {
+    if (applyFrame) {
+      framedPath = await compositeWithActiveFrame(
+        resolveVendorBin("ffmpeg"),
+        tempPath,
+        "video",
+        mediaFrameId,
+        mediaFrameFitMode
+      );
+      sourcePath = framedPath;
+    }
+
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: "Save recording",
+      defaultPath: path.join(app.getPath("videos"), `mirrox-${serial}-${Date.now()}.mp4`),
+      filters: [{ name: "MP4", extensions: ["mp4"] }],
+    });
+
+    if (canceled || !filePath) {
+      return { ok: true, saved: false, canceled: true };
+    }
+
+    fs.copyFileSync(sourcePath, filePath);
+    discardTempFile(tempPath);
+    return { ok: true, saved: true, path: filePath };
+  } finally {
+    discardTempFile(framedPath);
+  }
+}
+
+function discardTempFile(tempPath: string | undefined | null): void {
+  if (!tempPath || !fs.existsSync(tempPath)) return;
   try {
     fs.unlinkSync(tempPath);
   } catch {
     /* ignore */
   }
-  return { ok: true, saved: true, path: filePath };
 }
 
 function registerIpc(): void {
@@ -522,7 +576,7 @@ function registerIpc(): void {
 
   ipcMain.handle("mirror:stop", async (_e, serial: string) => {
     if (recordings.has(serial)) {
-      await stopRecordingInternal(serial).catch(() => undefined);
+      await stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
     }
     markRestarting(serial);
     await mirrors.stop(serial);
@@ -664,6 +718,45 @@ function registerIpc(): void {
 
   ipcMain.handle("device:getInfo", async (_e, serial: string) => adb.getDeviceDetails(serial));
 
+  ipcMain.handle("device:getFramePreview", async (_e, serial: string) => {
+    const tempPath = path.join(
+      app.getPath("temp"),
+      `mirrox-frame-${serial.replace(/[^\w.-]+/g, "_")}-${Date.now()}.png`
+    );
+    try {
+      await adb.screencap(serial, tempPath);
+      let image = nativeImage.createFromPath(tempPath);
+      if (image.isEmpty()) {
+        return { ok: false, reason: "Empty screenshot" };
+      }
+      const { width, height } = image.getSize();
+      const maxEdge = 480;
+      if (Math.max(width, height) > maxEdge) {
+        const scale = maxEdge / Math.max(width, height);
+        image = image.resize({
+          width: Math.max(1, Math.round(width * scale)),
+          height: Math.max(1, Math.round(height * scale)),
+          quality: "better",
+        });
+      }
+      const size = image.getSize();
+      return {
+        ok: true,
+        dataUrl: image.toDataURL(),
+        width: size.width,
+        height: size.height,
+      };
+    } catch (err) {
+      return { ok: false, reason: String(err) };
+    } finally {
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
   ipcMain.handle(
     "device:keyevent",
     async (_e, serial: string, code: number | string) => {
@@ -708,6 +801,7 @@ function registerIpc(): void {
 
   ipcMain.handle("settings:get", async () => {
     const scrcpyPath = resolveVendorBin("scrcpy");
+    const frame = loadActiveMediaFrame(mediaFrameId);
     return {
       quality,
       alwaysOnTop,
@@ -715,11 +809,17 @@ function registerIpc(): void {
       navBarEnabled,
       clipboardAutosyncDefault,
       screenshotCopyToClipboard,
+      mediaFrameApplyDefault,
+      mediaFrameId,
+      mediaFrameFitMode,
+      mediaFramePath: frame?.path ?? null,
+      mediaFrameDataUrl: frame?.dataUrl ?? null,
       onboardingDismissed,
       updateBannerDismissedVersion,
       adbPath: adb.adbPath,
       scrcpyPath,
       scrcpyServerPath: resolveScrcpyServer(scrcpyPath) ?? null,
+      ffmpegPath: resolveVendorBin("ffmpeg"),
     };
   });
 
@@ -734,6 +834,9 @@ function registerIpc(): void {
         navBarEnabled?: boolean;
         clipboardAutosyncDefault?: boolean;
         screenshotCopyToClipboard?: boolean;
+        mediaFrameApplyDefault?: boolean;
+        mediaFrameId?: string | null;
+        mediaFrameFitMode?: "media-to-frame" | "frame-to-media";
         onboardingDismissed?: boolean;
         updateBannerDismissedVersion?: string | null;
       }
@@ -754,6 +857,18 @@ function registerIpc(): void {
       if (typeof partial.screenshotCopyToClipboard === "boolean") {
         screenshotCopyToClipboard = partial.screenshotCopyToClipboard;
       }
+      if (typeof partial.mediaFrameApplyDefault === "boolean") {
+        mediaFrameApplyDefault = partial.mediaFrameApplyDefault;
+      }
+      if (partial.mediaFrameId !== undefined) {
+        mediaFrameId = partial.mediaFrameId;
+      }
+      if (
+        partial.mediaFrameFitMode === "media-to-frame" ||
+        partial.mediaFrameFitMode === "frame-to-media"
+      ) {
+        mediaFrameFitMode = partial.mediaFrameFitMode;
+      }
       if (typeof partial.onboardingDismissed === "boolean") {
         onboardingDismissed = partial.onboardingDismissed;
       }
@@ -761,6 +876,7 @@ function registerIpc(): void {
         updateBannerDismissedVersion = partial.updateBannerDismissedVersion;
       }
 
+      const frame = loadActiveMediaFrame(mediaFrameId);
       saveSettings({
         quality,
         alwaysOnTop,
@@ -768,6 +884,10 @@ function registerIpc(): void {
         navBarEnabled,
         clipboardAutosyncDefault,
         screenshotCopyToClipboard,
+        mediaFrameApplyDefault,
+        mediaFrameId,
+        mediaFrameFitMode,
+        mediaFramePath: frame?.path ?? null,
         onboardingDismissed,
         updateBannerDismissedVersion,
       });
@@ -794,6 +914,11 @@ function registerIpc(): void {
         navBarEnabled,
         clipboardAutosyncDefault,
         screenshotCopyToClipboard,
+        mediaFrameApplyDefault,
+        mediaFrameId,
+        mediaFrameFitMode,
+        mediaFramePath: frame?.path ?? null,
+        mediaFrameDataUrl: frame?.dataUrl ?? null,
         onboardingDismissed,
         updateBannerDismissedVersion,
       };
@@ -828,38 +953,144 @@ function registerIpc(): void {
     return { ok: true, ...shot };
   });
 
-  ipcMain.handle("screenshot:save", async (_e, tempPath: string, serial: string) => {
-    if (!tempPath || !fs.existsSync(tempPath)) {
-      throw new Error("Screenshot file missing");
+  ipcMain.handle(
+    "screenshot:save",
+    async (_e, tempPath: string, serial: string, applyFrame = false) => {
+      if (!tempPath || !fs.existsSync(tempPath)) {
+        throw new Error("Screenshot file missing");
+      }
+      let sourcePath = tempPath;
+      let framedPath: string | null = null;
+      try {
+        if (applyFrame) {
+          framedPath = await compositeWithActiveFrame(
+            resolveVendorBin("ffmpeg"),
+            tempPath,
+            "image",
+            mediaFrameId,
+            mediaFrameFitMode
+          );
+          sourcePath = framedPath;
+        }
+        const { canceled, filePath } = await dialog.showSaveDialog({
+          title: "Save screenshot",
+          defaultPath: path.join(app.getPath("pictures"), `mirrox-${serial}-${Date.now()}.png`),
+          filters: [{ name: "PNG", extensions: ["png"] }],
+        });
+        if (canceled || !filePath) return { ok: false, canceled: true };
+        fs.copyFileSync(sourcePath, filePath);
+        return { ok: true, path: filePath };
+      } finally {
+        discardTempFile(framedPath);
+      }
     }
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: "Save screenshot",
-      defaultPath: path.join(app.getPath("pictures"), `mirrox-${serial}-${Date.now()}.png`),
-      filters: [{ name: "PNG", extensions: ["png"] }],
-    });
-    if (canceled || !filePath) return { ok: false, canceled: true };
-    fs.copyFileSync(tempPath, filePath);
-    return { ok: true, path: filePath };
-  });
+  );
 
-  ipcMain.handle("screenshot:copy", async (_e, tempPath: string) => {
+  ipcMain.handle("screenshot:copy", async (_e, tempPath: string, applyFrame = false) => {
     if (!tempPath || !fs.existsSync(tempPath)) {
       throw new Error("Screenshot file missing");
     }
-    const image = nativeImage.createFromPath(tempPath);
-    if (image.isEmpty()) throw new Error("Could not load screenshot");
-    clipboard.writeImage(image);
-    return { ok: true };
+    let sourcePath = tempPath;
+    let framedPath: string | null = null;
+    try {
+      if (applyFrame) {
+        framedPath = await compositeWithActiveFrame(
+          resolveVendorBin("ffmpeg"),
+          tempPath,
+          "image",
+          mediaFrameId,
+          mediaFrameFitMode
+        );
+        sourcePath = framedPath;
+      }
+      const image = nativeImage.createFromPath(sourcePath);
+      if (image.isEmpty()) throw new Error("Could not load screenshot");
+      clipboard.writeImage(image);
+      return { ok: true };
+    } finally {
+      discardTempFile(framedPath);
+    }
   });
 
   ipcMain.handle("screenshot:discard", async (_e, tempPath: string) => {
-    if (tempPath && fs.existsSync(tempPath)) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {
-        /* ignore */
-      }
-    }
+    discardTempFile(tempPath);
+    return { ok: true };
+  });
+
+  ipcMain.handle("frame:get", async () => {
+    const frame = loadActiveMediaFrame(mediaFrameId);
+    const builtins = listBuiltinFrames().map((f) => ({
+      id: f.id,
+      name: f.name,
+      dataUrl: f.dataUrl,
+      width: f.width,
+      height: f.height,
+    }));
+    return {
+      id: frame?.id ?? mediaFrameId,
+      path: frame?.path ?? null,
+      dataUrl: frame?.dataUrl ?? null,
+      width: frame?.width ?? null,
+      height: frame?.height ?? null,
+      name: frame?.name ?? null,
+      applyDefault: mediaFrameApplyDefault,
+      fitMode: mediaFrameFitMode,
+      builtins,
+    };
+  });
+
+  ipcMain.handle("frame:pick", async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: "Choose frame image",
+      properties: ["openFile"],
+      filters: [
+        { name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] },
+      ],
+    });
+    if (canceled || !filePaths[0]) return { ok: false, canceled: true };
+    const installed = installMediaFrame(filePaths[0]);
+    mediaFrameId = "custom";
+    saveSettings({
+      mediaFrameId,
+      mediaFramePath: installed.path,
+      mediaFrameApplyDefault,
+    });
+    return {
+      ok: true,
+      id: installed.id,
+      path: installed.path,
+      dataUrl: installed.dataUrl,
+      width: installed.width,
+      height: installed.height,
+      name: installed.name,
+      rect: installed.rect,
+    };
+  });
+
+  ipcMain.handle("frame:select", async (_e, id: string) => {
+    const frame = loadActiveMediaFrame(id);
+    if (!frame) throw new Error("Frame not found");
+    mediaFrameId = frame.id;
+    saveSettings({
+      mediaFrameId,
+      mediaFramePath: frame.path,
+      mediaFrameApplyDefault,
+    });
+    return {
+      ok: true,
+      id: frame.id,
+      path: frame.path,
+      dataUrl: frame.dataUrl,
+      width: frame.width,
+      height: frame.height,
+      name: frame.name,
+    };
+  });
+
+  ipcMain.handle("frame:clear", async () => {
+    clearStoredMediaFrame();
+    mediaFrameId = null;
+    saveSettings({ mediaFramePath: null, mediaFrameId: null });
     return { ok: true };
   });
 
@@ -873,6 +1104,19 @@ function registerIpc(): void {
     const result = await stopRecordingInternal(serial);
     await refreshDevices();
     return result;
+  });
+
+  ipcMain.handle(
+    "record:save",
+    async (_e, tempPath: string, serial: string, applyFrame = false) => {
+      const result = await saveRecordingInternal(tempPath, serial, Boolean(applyFrame));
+      return result;
+    }
+  );
+
+  ipcMain.handle("record:discard", async (_e, tempPath: string) => {
+    discardTempFile(tempPath);
+    return { ok: true };
   });
 
   ipcMain.handle("record:isRecording", async (_e, serial: string) => recordings.has(serial));
@@ -1257,6 +1501,20 @@ app.whenReady().then(() => {
   if (typeof persisted.screenshotCopyToClipboard === "boolean") {
     screenshotCopyToClipboard = persisted.screenshotCopyToClipboard;
   }
+  if (typeof persisted.mediaFrameApplyDefault === "boolean") {
+    mediaFrameApplyDefault = persisted.mediaFrameApplyDefault;
+  }
+  if (
+    persisted.mediaFrameFitMode === "media-to-frame" ||
+    persisted.mediaFrameFitMode === "frame-to-media"
+  ) {
+    mediaFrameFitMode = persisted.mediaFrameFitMode;
+  }
+  if (typeof persisted.mediaFrameId === "string" || persisted.mediaFrameId === null) {
+    mediaFrameId = persisted.mediaFrameId ?? null;
+  } else if (persisted.mediaFramePath) {
+    mediaFrameId = "custom";
+  }
   if (typeof persisted.onboardingDismissed === "boolean") {
     onboardingDismissed = persisted.onboardingDismissed;
   }
@@ -1365,7 +1623,7 @@ app.whenReady().then(() => {
     void (async () => {
       fullscreenBySerial.delete(serial);
       if (recordings.has(serial)) {
-        await stopRecordingInternal(serial).catch(() => undefined);
+        await stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
       }
       if (shortcutTarget === serial) {
         shortcutTarget = resolveShortcutTarget();
@@ -1403,7 +1661,7 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   mirrorShortcuts?.dispose();
   for (const serial of [...recordings.keys()]) {
-    void stopRecordingInternal(serial).catch(() => undefined);
+    void stopRecordingInternal(serial, { discard: true }).catch(() => undefined);
   }
   adb?.stopWatching();
   void mirrors?.stopAll();

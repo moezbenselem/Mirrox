@@ -30,6 +30,8 @@ export interface DeviceDetails {
   ip?: string | null;
   storage?: { used?: string; total?: string; available?: string; raw?: string };
   connection: "Cable" | "Wireless";
+  displayWidth?: number;
+  displayHeight?: number;
   available: boolean;
   unavailableReason?: string;
 }
@@ -59,6 +61,13 @@ const api = {
   listCameras: (serial: string) => ipcRenderer.invoke("device:listCameras", serial),
   getDeviceInfo: (serial: string): Promise<DeviceDetails> =>
     ipcRenderer.invoke("device:getInfo", serial),
+  getDeviceFramePreview: (serial: string) =>
+    ipcRenderer.invoke("device:getFramePreview", serial) as Promise<{
+      ok: boolean;
+      dataUrl: string;
+      width: number;
+      height: number;
+    }>,
   sendNav: (
     serial: string,
     action: "back" | "home" | "recents" | "notifications"
@@ -80,6 +89,8 @@ const api = {
     navBarEnabled?: boolean;
     clipboardAutosyncDefault?: boolean;
     screenshotCopyToClipboard?: boolean;
+    mediaFrameApplyDefault?: boolean;
+    mediaFrameFitMode?: "media-to-frame" | "frame-to-media";
     onboardingDismissed?: boolean;
     updateBannerDismissedVersion?: string | null;
   }) => ipcRenderer.invoke("settings:set", partial),
@@ -90,12 +101,20 @@ const api = {
   disconnectWireless: (hostPort?: string) =>
     ipcRenderer.invoke("wireless:disconnect", hostPort),
   takeScreenshot: (serial: string) => ipcRenderer.invoke("screenshot:take", serial),
-  saveScreenshot: (tempPath: string, serial: string) =>
-    ipcRenderer.invoke("screenshot:save", tempPath, serial),
-  copyScreenshot: (tempPath: string) => ipcRenderer.invoke("screenshot:copy", tempPath),
+  saveScreenshot: (tempPath: string, serial: string, applyFrame = false) =>
+    ipcRenderer.invoke("screenshot:save", tempPath, serial, applyFrame),
+  copyScreenshot: (tempPath: string, applyFrame = false) =>
+    ipcRenderer.invoke("screenshot:copy", tempPath, applyFrame),
   discardScreenshot: (tempPath: string) => ipcRenderer.invoke("screenshot:discard", tempPath),
+  getMediaFrame: () => ipcRenderer.invoke("frame:get"),
+  pickMediaFrame: () => ipcRenderer.invoke("frame:pick"),
+  selectMediaFrame: (id: string) => ipcRenderer.invoke("frame:select", id),
+  clearMediaFrame: () => ipcRenderer.invoke("frame:clear"),
   startRecording: (serial: string) => ipcRenderer.invoke("record:start", serial),
   stopRecording: (serial: string) => ipcRenderer.invoke("record:stop", serial),
+  saveRecording: (tempPath: string, serial: string, applyFrame = false) =>
+    ipcRenderer.invoke("record:save", tempPath, serial, applyFrame),
+  discardRecording: (tempPath: string) => ipcRenderer.invoke("record:discard", tempPath),
   isRecording: (serial: string): Promise<boolean> =>
     ipcRenderer.invoke("record:isRecording", serial),
   dropFiles: (serial: string, filePaths: string[]) =>

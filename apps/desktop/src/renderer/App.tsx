@@ -45,12 +45,116 @@ function formatAccelerator(accelerator: string): string {
   return accelerator.replace(/CommandOrControl/g, "Ctrl");
 }
 
+function MediaFrameControls({
+  applyFrame,
+  onApplyChange,
+  fitMode,
+  onFitModeChange,
+  frameId,
+  frameDataUrl,
+  builtins,
+  busy,
+  onSelectBuiltin,
+  onPick,
+  onClear,
+}: {
+  applyFrame: boolean;
+  onApplyChange: (next: boolean) => void;
+  fitMode: "media-to-frame" | "frame-to-media";
+  onFitModeChange: (next: "media-to-frame" | "frame-to-media") => void;
+  frameId: string | null;
+  frameDataUrl: string | null;
+  builtins: Array<{ id: string; name: string; dataUrl: string }>;
+  busy: boolean;
+  onSelectBuiltin: (id: string) => void;
+  onPick: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="frame-options">
+      <label className="modal-check frame-check">
+        <input
+          type="checkbox"
+          checked={applyFrame}
+          disabled={busy}
+          onChange={(e) => onApplyChange(e.target.checked)}
+        />
+        Apply frame
+      </label>
+      {applyFrame && (
+        <div className="frame-picker">
+          {builtins.length > 0 && (
+            <div className="frame-builtin-row" role="listbox" aria-label="Pixel frames">
+              {builtins.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  className={`frame-builtin${frameId === f.id ? " selected" : ""}`}
+                  disabled={busy}
+                  title={f.name}
+                  aria-label={f.name}
+                  aria-selected={frameId === f.id}
+                  onClick={() => onSelectBuiltin(f.id)}
+                >
+                  <img src={f.dataUrl} alt="" className="frame-builtin-img" draggable={false} />
+                  <span className="frame-builtin-label">{f.name.replace(/^Pixel · /, "")}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="frame-fit-modes" role="radiogroup" aria-label="Frame fit mode">
+            <label className="frame-fit-option">
+              <input
+                type="radio"
+                name="frame-fit"
+                checked={fitMode === "media-to-frame"}
+                disabled={busy}
+                onChange={() => onFitModeChange("media-to-frame")}
+              />
+              Fit media to frame
+            </label>
+            <label className="frame-fit-option">
+              <input
+                type="radio"
+                name="frame-fit"
+                checked={fitMode === "frame-to-media"}
+                disabled={busy}
+                onChange={() => onFitModeChange("frame-to-media")}
+              />
+              Fit frame to media
+            </label>
+          </div>
+          <div className="frame-custom-row">
+            {frameId === "custom" && frameDataUrl ? (
+              <img src={frameDataUrl} alt="Custom frame" className="frame-thumb" />
+            ) : (
+              <span className="frame-hint">
+                Or upload a PNG/JPEG with a green (#00FF00) placeholder
+              </span>
+            )}
+            <div className="frame-picker-actions">
+              <button className="btn" type="button" disabled={busy} onClick={onPick}>
+                {frameId === "custom" && frameDataUrl ? "Change…" : "Upload…"}
+              </button>
+              {frameId && (
+                <button className="btn" type="button" disabled={busy} onClick={onClear}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MirrorShortcuts({ navBarEnabled }: { navBarEnabled: boolean }) {
   return (
     <div className="card mirror-shortcuts">
       <h3>Mirror shortcuts</h3>
       <p className="mirror-shortcuts-hint">
-        Work while the scrcpy window is focused. Target is the selected mirroring device.
+        Work while the mirror window is focused. Target is the selected mirroring device.
         Clipboard syncs Mac ↔ phone while mirroring (MOD+c / MOD+x / MOD+v in the mirror).
         Fullscreen: button here, MOD+f in the mirror, or Esc to exit. Rotate: MOD+r. Pinch zoom:
         Ctrl+drag.
@@ -77,7 +181,7 @@ function MirrorShortcuts({ navBarEnabled }: { navBarEnabled: boolean }) {
       </div>
       {!navBarEnabled && (
         <p className="mirror-shortcuts-hint" style={{ marginTop: 8, marginBottom: 0 }}>
-          Enable the optional nav bar in Quality for Back / Home / Recents without focusing scrcpy.
+          Enable the optional nav bar in Quality for Back / Home / Recents without focusing the mirror.
         </p>
       )}
     </div>
@@ -99,7 +203,15 @@ export default function App() {
   const [keepScreenOn, setKeepScreenOn] = useState(true);
   const [navBarEnabled, setNavBarEnabled] = useState(false);
   const [screenshotCopyToClipboard, setScreenshotCopyToClipboard] = useState(false);
-  const [wirelessHost, setWirelessHost] = useState("");
+  const [applyFrame, setApplyFrame] = useState(false);
+  const [frameFitMode, setFrameFitMode] = useState<"media-to-frame" | "frame-to-media">(
+    "media-to-frame"
+  );
+  const [frameId, setFrameId] = useState<string | null>(null);
+  const [frameDataUrl, setFrameDataUrl] = useState<string | null>(null);
+  const [builtinFrames, setBuiltinFrames] = useState<
+    Array<{ id: string; name: string; dataUrl: string }>
+  >([]);
   const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(
     null
   );
@@ -119,6 +231,10 @@ export default function App() {
   const [preview, setPreview] = useState<{
     path: string;
     dataUrl: string;
+    serial: string;
+  } | null>(null);
+  const [recordingSave, setRecordingSave] = useState<{
+    path: string;
     serial: string;
   } | null>(null);
 
@@ -142,7 +258,20 @@ export default function App() {
       setKeepScreenOn(s.keepScreenOn);
       setNavBarEnabled(s.navBarEnabled);
       setScreenshotCopyToClipboard(Boolean(s.screenshotCopyToClipboard));
+      setApplyFrame(Boolean(s.mediaFrameApplyDefault));
+      setFrameFitMode(
+        s.mediaFrameFitMode === "frame-to-media" ? "frame-to-media" : "media-to-frame"
+      );
+      setFrameDataUrl(s.mediaFrameDataUrl ?? null);
+      setFrameId(s.mediaFrameId ?? null);
       setShowOnboarding(!s.onboardingDismissed);
+    });
+    void window.mirrox.getMediaFrame().then((f) => {
+      setFrameDataUrl(f.dataUrl);
+      setFrameId(f.id);
+      setApplyFrame(Boolean(f.applyDefault));
+      setFrameFitMode(f.fitMode === "frame-to-media" ? "frame-to-media" : "media-to-frame");
+      setBuiltinFrames(f.builtins ?? []);
     });
 
     const offDevices = window.mirrox.onDevicesUpdated((list) => {
@@ -199,9 +328,14 @@ export default function App() {
             started?: boolean;
             saved?: boolean;
             path?: string;
+            tempPath?: string;
+            serial?: string;
           };
           if (p.started) showToast("ok", "Recording…");
-          else if (p.saved && p.path) showToast("ok", `Saved ${p.path}`);
+          else if (p.tempPath && (p.serial || serial)) {
+            setRecordingSave({ path: p.tempPath, serial: p.serial ?? serial });
+            showToast("info", "Recording ready to save");
+          } else if (p.saved && p.path) showToast("ok", `Saved ${p.path}`);
           else showToast("info", "Recording stopped");
         }
       }
@@ -314,24 +448,10 @@ export default function App() {
     try {
       const result = await window.mirrox.enableWireless(selectedDevice.serial);
       if (result.hint) {
-        setWirelessHost(result.hint);
-        showToast("ok", `TCP/IP enabled. Unplug USB, then Connect ${result.hint}`);
+        showToast("ok", `Wireless ready — use Pair or connect to ${result.hint}`);
       } else {
-        showToast("info", "TCP/IP mode enabled on port 5555. Enter device IP:5555 below.");
+        showToast("info", "TCP/IP enabled on port 5555. Use Pair in the title bar.");
       }
-    } catch (err) {
-      showToast("error", String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function connectWireless() {
-    if (!wirelessHost.trim()) return;
-    setBusy(true);
-    try {
-      const { result } = await window.mirrox.connectWireless(wirelessHost.trim());
-      showToast("ok", result || `Connected to ${wirelessHost}`);
     } catch (err) {
       showToast("error", String(err));
     } finally {
@@ -379,16 +499,78 @@ export default function App() {
     await window.mirrox.setSettings({ screenshotCopyToClipboard: next });
   }
 
+  async function setApplyFrameDefault(next: boolean) {
+    setApplyFrame(next);
+    await window.mirrox.setSettings({ mediaFrameApplyDefault: next });
+    if (next && !frameId && builtinFrames[0]) {
+      await selectBuiltinFrame(builtinFrames[0].id);
+    }
+  }
+
+  async function setFrameFitModeDefault(next: "media-to-frame" | "frame-to-media") {
+    setFrameFitMode(next);
+    await window.mirrox.setSettings({ mediaFrameFitMode: next });
+  }
+
+  async function pickFrame() {
+    setBusy(true);
+    try {
+      const result = await window.mirrox.pickMediaFrame();
+      if (result.ok && result.dataUrl) {
+        setFrameDataUrl(result.dataUrl);
+        setFrameId(result.id ?? "custom");
+        showToast("ok", "Custom frame loaded — green area auto-detected");
+      }
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function selectBuiltinFrame(id: string) {
+    setBusy(true);
+    try {
+      const result = await window.mirrox.selectMediaFrame(id);
+      setFrameDataUrl(result.dataUrl);
+      setFrameId(result.id);
+      showToast("ok", `${result.name} selected`);
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearFrame() {
+    setBusy(true);
+    try {
+      await window.mirrox.clearMediaFrame();
+      setFrameDataUrl(null);
+      setFrameId(null);
+      showToast("info", "Frame cleared");
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleRecord() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
     try {
       if (recording) {
         const result = await window.mirrox.stopRecording(selectedDevice.serial);
-        showToast(
-          result.saved ? "ok" : "info",
-          result.saved ? `Saved ${result.path}` : "Recording stopped"
-        );
+        if (result.tempPath) {
+          setRecordingSave({
+            path: result.tempPath,
+            serial: result.serial ?? selectedDevice.serial,
+          });
+          showToast("info", "Recording ready to save");
+        } else {
+          showToast("info", "Recording stopped");
+        }
       } else {
         await window.mirrox.startRecording(selectedDevice.serial);
         showToast("ok", "Recording…");
@@ -527,9 +709,17 @@ export default function App() {
 
   async function savePreview() {
     if (!preview) return;
+    if (applyFrame && !frameDataUrl) {
+      showToast("error", "Choose a Pixel frame or upload a custom one first");
+      return;
+    }
     setBusy(true);
     try {
-      const result = await window.mirrox.saveScreenshot(preview.path, preview.serial);
+      const result = await window.mirrox.saveScreenshot(
+        preview.path,
+        preview.serial,
+        applyFrame
+      );
       if (result.ok && result.path) showToast("ok", `Saved ${result.path}`);
     } catch (err) {
       showToast("error", String(err));
@@ -540,9 +730,13 @@ export default function App() {
 
   async function copyPreview() {
     if (!preview) return;
+    if (applyFrame && !frameDataUrl) {
+      showToast("error", "Choose a Pixel frame or upload a custom one first");
+      return;
+    }
     setBusy(true);
     try {
-      await window.mirrox.copyScreenshot(preview.path);
+      await window.mirrox.copyScreenshot(preview.path, applyFrame);
       showToast("ok", "Copied to clipboard");
     } catch (err) {
       showToast("error", String(err));
@@ -554,6 +748,37 @@ export default function App() {
   async function closePreview() {
     if (preview) void window.mirrox.discardScreenshot(preview.path);
     setPreview(null);
+  }
+
+  async function saveRecordingPreview() {
+    if (!recordingSave) return;
+    if (applyFrame && !frameDataUrl) {
+      showToast("error", "Choose a Pixel frame or upload a custom one first");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await window.mirrox.saveRecording(
+        recordingSave.path,
+        recordingSave.serial,
+        applyFrame
+      );
+      if (result.saved && result.path) {
+        setRecordingSave(null);
+        showToast("ok", `Saved ${result.path}`);
+      } else if (result.canceled) {
+        showToast("info", "Save canceled");
+      }
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function discardRecordingPreview() {
+    if (recordingSave) void window.mirrox.discardRecording(recordingSave.path);
+    setRecordingSave(null);
   }
 
   async function dismissOnboarding(permanent: boolean) {
@@ -664,7 +889,7 @@ export default function App() {
                       ? "Unauthorized — unlock the phone and allow USB debugging."
                       : mirroring
                         ? `Native mirror window is open${videoSource === "camera" ? " (camera)" : ""}. Shortcuts: ${formatAccelerator("CommandOrControl+Shift+S")} screenshot, ${formatAccelerator("CommandOrControl+Shift+R")} record.`
-                        : "Ready to mirror. Click View to open a native scrcpy window."}
+                        : "Ready to mirror. Click View to open a native mirror window."}
                   </p>
                 </div>
 
@@ -784,132 +1009,117 @@ export default function App() {
                 )}
 
                 {canControl && (
-                  <div className="card">
-                    <h3>Quick actions</h3>
-                    <div className="quick-actions">
-                      <button
-                        className="btn"
-                        disabled={busy}
-                        onClick={() => void screenshot()}
-                        title={`Screenshot (${formatAccelerator("CommandOrControl+Shift+S")})`}
-                      >
-                        Screenshot
-                      </button>
-                      <button
-                        className={`btn ${recording ? "danger" : ""}`}
-                        disabled={busy}
-                        onClick={() => void toggleRecord()}
-                        title={`Record (${formatAccelerator("CommandOrControl+Shift+R")})`}
-                      >
-                        {recording ? "Stop record" : "Record"}
-                      </button>
-                      <button
-                        className={`btn ${audioOn ? "active-toggle" : ""}`}
-                        disabled={busy}
-                        onClick={() => void toggleAudio()}
-                        title="Audio mirroring"
-                      >
-                        Audio {audioOn ? "on" : "off"}
-                      </button>
-                      <button
-                        className={`btn ${clipboardOn ? "active-toggle" : ""}`}
-                        disabled={busy}
-                        onClick={() => void toggleClipboard()}
-                        title="Clipboard sync Mac ↔ phone"
-                      >
-                        Clipboard {clipboardOn ? "on" : "off"}
-                      </button>
-                      <button
-                        className="btn"
-                        disabled={busy}
-                        onClick={() => void toggleScreen()}
-                        title="Device screen on/off"
-                      >
-                        Screen {screenOn ? "off" : "on"}
-                      </button>
-                      <button
-                        className={`btn ${demoMode ? "active-toggle" : ""}`}
-                        disabled={busy}
-                        onClick={() => void toggleDemoMode()}
-                        title="System UI Demo Mode — clean status bar for screenshots"
-                      >
-                        Demo {demoMode ? "on" : "off"}
-                      </button>
-                      <button
-                        className={`btn ${isFullscreen ? "active-toggle" : ""}`}
-                        disabled={!mirroring || busy}
-                        onClick={() => void fullscreen()}
-                        title={
-                          isFullscreen
-                            ? "Exit fullscreen (Esc)"
-                            : "Fullscreen mirror (Esc to exit)"
-                        }
-                      >
-                        {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                      </button>
+                  <div className="cards-row">
+                    <div className="card">
+                      <h3>Quick actions</h3>
+                      <div className="quick-actions">
+                        <button
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => void screenshot()}
+                          title={`Screenshot (${formatAccelerator("CommandOrControl+Shift+S")})`}
+                        >
+                          Screenshot
+                        </button>
+                        <button
+                          className={`btn ${recording ? "danger" : ""}`}
+                          disabled={busy}
+                          onClick={() => void toggleRecord()}
+                          title={`Record (${formatAccelerator("CommandOrControl+Shift+R")})`}
+                        >
+                          {recording ? "Stop record" : "Record"}
+                        </button>
+                        <button
+                          className={`btn ${audioOn ? "active-toggle" : ""}`}
+                          disabled={busy}
+                          onClick={() => void toggleAudio()}
+                          title="Audio mirroring"
+                        >
+                          Audio {audioOn ? "on" : "off"}
+                        </button>
+                        <button
+                          className={`btn ${clipboardOn ? "active-toggle" : ""}`}
+                          disabled={busy}
+                          onClick={() => void toggleClipboard()}
+                          title="Clipboard sync Mac ↔ phone"
+                        >
+                          Clipboard {clipboardOn ? "on" : "off"}
+                        </button>
+                        <button
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => void toggleScreen()}
+                          title="Device screen on/off"
+                        >
+                          Screen {screenOn ? "off" : "on"}
+                        </button>
+                        <button
+                          className={`btn ${demoMode ? "active-toggle" : ""}`}
+                          disabled={busy}
+                          onClick={() => void toggleDemoMode()}
+                          title="System UI Demo Mode — clean status bar for screenshots"
+                        >
+                          Demo {demoMode ? "on" : "off"}
+                        </button>
+                        <button
+                          className={`btn ${isFullscreen ? "active-toggle" : ""}`}
+                          disabled={!mirroring || busy}
+                          onClick={() => void fullscreen()}
+                          title={
+                            isFullscreen
+                              ? "Exit fullscreen (Esc)"
+                              : "Fullscreen mirror (Esc to exit)"
+                          }
+                        >
+                          {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="card">
+                      <h3>Quality</h3>
+                      <div className="quality-stack">
+                        <div className="row">
+                          <span className="label">Bitrate</span>
+                          <select
+                            value={quality}
+                            onChange={(e) => void updateQuality(e.target.value as QualityPreset)}
+                          >
+                            <option value="low">Low (2 Mbps)</option>
+                            <option value="medium">Medium (8 Mbps)</option>
+                            <option value="high">High (16 Mbps)</option>
+                          </select>
+                        </div>
+                        <label className="checkbox">
+                          <input
+                            type="checkbox"
+                            checked={alwaysOnTop}
+                            onChange={(e) => void updateAlwaysOnTop(e.target.checked)}
+                          />
+                          Always on top
+                        </label>
+                        <label className="checkbox">
+                          <input
+                            type="checkbox"
+                            checked={keepScreenOn}
+                            onChange={(e) => void updateKeepScreenOn(e.target.checked)}
+                          />
+                          Keep screen on
+                        </label>
+                        <label className="checkbox">
+                          <input
+                            type="checkbox"
+                            checked={navBarEnabled}
+                            onChange={(e) => void updateNavBar(e.target.checked)}
+                          />
+                          Nav bar
+                        </label>
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {canControl && mirroring && <MirrorShortcuts navBarEnabled={navBarEnabled} />}
-
-                <div className="card">
-                  <h3>Quality</h3>
-                  <div className="row">
-                    <span className="label">Bitrate</span>
-                    <select
-                      value={quality}
-                      onChange={(e) => void updateQuality(e.target.value as QualityPreset)}
-                    >
-                      <option value="low">Low (2 Mbps)</option>
-                      <option value="medium">Medium (8 Mbps)</option>
-                      <option value="high">High (16 Mbps)</option>
-                    </select>
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={alwaysOnTop}
-                        onChange={(e) => void updateAlwaysOnTop(e.target.checked)}
-                      />
-                      Always on top
-                    </label>
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={keepScreenOn}
-                        onChange={(e) => void updateKeepScreenOn(e.target.checked)}
-                      />
-                      Keep screen on
-                    </label>
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={navBarEnabled}
-                        onChange={(e) => void updateNavBar(e.target.checked)}
-                      />
-                      Nav bar
-                    </label>
-                  </div>
-                </div>
-
-                <div className="card">
-                  <h3>Wireless ADB</h3>
-                  <div className="row">
-                    <span className="label">Host:port</span>
-                    <input
-                      type="text"
-                      placeholder="192.168.1.20:5555"
-                      value={wirelessHost}
-                      onChange={(e) => setWirelessHost(e.target.value)}
-                    />
-                    <button className="btn" disabled={busy} onClick={() => void connectWireless()}>
-                      Connect
-                    </button>
-                    <button className="btn" disabled={busy} onClick={() => setPairOpen(true)}>
-                      Pair with code…
-                    </button>
-                  </div>
-                </div>
 
                 {canControl && (
                   <FileTransfer serial={selectedDevice.serial} disabled={busy} onToast={showToast} />
@@ -977,6 +1187,65 @@ export default function App() {
                 />
                 Always copy to clipboard
               </label>
+            </div>
+            <MediaFrameControls
+              applyFrame={applyFrame}
+              onApplyChange={(next) => void setApplyFrameDefault(next)}
+              fitMode={frameFitMode}
+              onFitModeChange={(next) => void setFrameFitModeDefault(next)}
+              frameId={frameId}
+              frameDataUrl={frameDataUrl}
+              builtins={builtinFrames}
+              busy={busy}
+              onSelectBuiltin={(id) => void selectBuiltinFrame(id)}
+              onPick={() => void pickFrame()}
+              onClear={() => void clearFrame()}
+            />
+          </div>
+        </div>
+      )}
+
+      {recordingSave && (
+        <div className="modal-backdrop" onClick={() => void discardRecordingPreview()}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-label="Save recording"
+          >
+            <div className="modal-header">
+              <h3>Save recording</h3>
+              <button className="btn" onClick={() => void discardRecordingPreview()} disabled={busy}>
+                Discard
+              </button>
+            </div>
+            <p className="frame-hint" style={{ margin: 0 }}>
+              Recording pulled from the device. Optionally apply a green-space frame before saving.
+            </p>
+            <MediaFrameControls
+              applyFrame={applyFrame}
+              onApplyChange={(next) => void setApplyFrameDefault(next)}
+              fitMode={frameFitMode}
+              onFitModeChange={(next) => void setFrameFitModeDefault(next)}
+              frameId={frameId}
+              frameDataUrl={frameDataUrl}
+              builtins={builtinFrames}
+              busy={busy}
+              onSelectBuiltin={(id) => void selectBuiltinFrame(id)}
+              onPick={() => void pickFrame()}
+              onClear={() => void clearFrame()}
+            />
+            <div className="modal-actions">
+              <button
+                className="btn primary"
+                disabled={busy}
+                onClick={() => void saveRecordingPreview()}
+              >
+                Save…
+              </button>
+              <button className="btn" disabled={busy} onClick={() => void discardRecordingPreview()}>
+                Discard
+              </button>
             </div>
           </div>
         </div>

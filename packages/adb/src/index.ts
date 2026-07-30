@@ -40,6 +40,8 @@ export interface DeviceDetails {
   ip?: string | null;
   storage?: DeviceStorageInfo;
   connection: "Cable" | "Wireless";
+  displayWidth?: number;
+  displayHeight?: number;
   available: boolean;
   unavailableReason?: string;
 }
@@ -303,6 +305,23 @@ export class AdbClient extends EventEmitter {
     }
   }
 
+  async getDisplaySize(serial: string): Promise<{ width?: number; height?: number }> {
+    try {
+      const { stdout } = await this.shell("wm size", serial);
+      // Physical size: 1080x2400  or  Override size: ...
+      const override = stdout.match(/Override size:\s*(\d+)x(\d+)/i);
+      const physical = stdout.match(/Physical size:\s*(\d+)x(\d+)/i);
+      const match = override ?? physical;
+      if (!match) return {};
+      const width = Number.parseInt(match[1], 10);
+      const height = Number.parseInt(match[2], 10);
+      if (!Number.isFinite(width) || !Number.isFinite(height)) return {};
+      return { width, height };
+    } catch {
+      return {};
+    }
+  }
+
   async getStorageInfo(serial: string): Promise<DeviceStorageInfo> {
     try {
       const { stdout } = await this.shell("df -h /sdcard 2>/dev/null || df -h /data", serial);
@@ -354,7 +373,7 @@ export class AdbClient extends EventEmitter {
         };
       }
 
-      const [model, androidVersion, sdk, battery, ip, storage] = await Promise.all([
+      const [model, androidVersion, sdk, battery, ip, storage, display] = await Promise.all([
         found.model
           ? Promise.resolve(found.model)
           : this.getProp(serial, "ro.product.model").catch(() => ""),
@@ -363,6 +382,7 @@ export class AdbClient extends EventEmitter {
         this.getBatteryInfo(serial),
         this.getDeviceIp(serial),
         this.getStorageInfo(serial),
+        this.getDisplaySize(serial),
       ]);
 
       return {
@@ -374,6 +394,8 @@ export class AdbClient extends EventEmitter {
         ip,
         storage,
         connection,
+        displayWidth: display.width,
+        displayHeight: display.height,
         available: true,
       };
     } catch (err) {
@@ -457,11 +479,43 @@ export class AdbClient extends EventEmitter {
   }
 
   async screencap(serial: string, destPath: string): Promise<string> {
-    const remote = "/sdcard/mirrox-shot.png";
-    await this.shell(`screencap -p -- ${shellQuote(remote)}`, serial);
-    await this.run(["pull", remote, destPath], serial);
-    await this.shell(`rm -f -- ${shellQuote(remote)}`, serial).catch(() => undefined);
-    return destPath;
+    // Prefer exec-out: no device storage permission / /sdcard required.
+    try {
+      const fullArgs = serial
+        ? ["-s", serial, "exec-out", "screencap", "-p"]
+        : ["exec-out", "screencap", "-p"];
+      const { stdout } = await execFileAsync(this.adbPath, fullArgs, {
+        encoding: "buffer",
+        maxBuffer: 40 * 1024 * 1024,
+        timeout: 60_000,
+      });
+      const png = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+      if (png.length < 100 || png[0] !== 0x89 || png[1] !== 0x50) {
+        throw new Error("exec-out screencap did not return a PNG");
+      }
+      fs.writeFileSync(destPath, png);
+      return destPath;
+    } catch {
+      /* fall through to file-based capture */
+    }
+
+    const candidates = [
+      "/data/local/tmp/mirrox-shot.png",
+      "/sdcard/Download/mirrox-shot.png",
+      "/sdcard/mirrox-shot.png",
+    ];
+    let lastErr: unknown;
+    for (const remote of candidates) {
+      try {
+        await this.shell(`screencap -p -- ${shellQuote(remote)}`, serial);
+        await this.run(["pull", remote, destPath], serial);
+        await this.shell(`rm -f -- ${shellQuote(remote)}`, serial).catch(() => undefined);
+        return destPath;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr ?? "screencap failed"));
   }
 
   /** Turn device display off/on (mirror can keep running). */

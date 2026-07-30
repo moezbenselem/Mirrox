@@ -1,0 +1,12 @@
+---
+description: Never mention scrcpy in user-facing Mirrox copy
+alwaysApply: true
+---
+
+# No scrcpy branding
+
+Never mention "scrcpy" (or "Scrcpy") in any user-facing text: UI labels, status messages, tooltips, errors shown to users, dialogs, or in-app help.
+
+Say "mirror window", "native mirror", or "mirroring" instead.
+
+Internal code (binary paths, env vars, comments, vendor scripts) may still refer to scrcpy.

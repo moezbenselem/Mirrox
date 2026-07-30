@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Vendors adb + a portable scrcpy (with dylibs) into vendor/bin-<arch>.
+ * Vendors adb + portable scrcpy + ffmpeg (with dylibs) into vendor/bin-<arch>.
  *
  * Usage:
  *   npm run vendor              # host arch (arm64 or x64)
@@ -8,7 +8,7 @@
  *   npm run vendor:x64          # uses vendor/staging-x64 cellar bottles
  *
  * Env:
- *   SCRCPY_PATH, ADB_PATH, VENDOR_ARCH=arm64|x64
+ *   SCRCPY_PATH, ADB_PATH, FFMPEG_PATH, VENDOR_ARCH=arm64|x64
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -170,7 +170,46 @@ function findInCellar(cellar, name) {
       null
     );
   }
+  if (name === "ffmpeg") {
+    return (
+      matches.find((p) => p.includes(`${path.sep}bin${path.sep}ffmpeg`)) ??
+      matches[0] ??
+      null
+    );
+  }
   return matches[0] ?? null;
+}
+
+function bundleDylibs(binaryOut, destLibDir, installPath, searchDirs, { overwriteDest = false } = {}) {
+  const dylibbundler = which("dylibbundler");
+  if (!dylibbundler) {
+    throw new Error("dylibbundler not found. Run: brew install dylibbundler");
+  }
+  fs.mkdirSync(destLibDir, { recursive: true });
+  console.log(`Bundling dylibs for ${path.basename(binaryOut)} → ${path.basename(destLibDir)}…`);
+  const bundlerArgs = [
+    ...(overwriteDest ? ["-od"] : ["-cd"]),
+    "-b",
+    "-x",
+    binaryOut,
+    "-d",
+    destLibDir,
+    "-p",
+    installPath,
+  ];
+  for (const dir of searchDirs) {
+    bundlerArgs.push("-s", dir);
+  }
+  run(dylibbundler, bundlerArgs);
+  try {
+    run("install_name_tool", [
+      "-add_rpath",
+      installPath.replace(/\/$/, ""),
+      binaryOut,
+    ]);
+  } catch {
+    /* already present */
+  }
 }
 
 const adb =
@@ -275,35 +314,58 @@ if (!dylibbundler) {
 }
 
 const scrcpyOut = path.join(outDir, "scrcpy");
-console.log("Bundling scrcpy dylibs with dylibbundler…");
-const bundlerArgs = [
-  "-od",
-  "-b",
-  "-x",
-  scrcpyOut,
-  "-d",
-  libDir,
-  "-p",
-  "@executable_path/lib/",
+bundleDylibs(scrcpyOut, libDir, "@executable_path/lib/", searchDirs, {
+  overwriteDest: true,
+});
+
+let ffmpeg =
+  process.env.FFMPEG_PATH ||
+  (arch === "x64" ? findInCellar(stagingCellar, "ffmpeg") : null) ||
+  which("ffmpeg");
+if (!ffmpeg || !fs.existsSync(ffmpeg)) {
+  console.error(
+    "ffmpeg not found. Run: brew install ffmpeg (or set FFMPEG_PATH)."
+  );
+  process.exit(1);
+}
+const ffmpegArchInfo = run("file", [ffmpeg]).trim();
+console.log("ffmpeg arch:", ffmpegArchInfo);
+const ffmpegArch = fileArch(ffmpeg);
+if (ffmpegArch !== "universal" && ffmpegArch !== arch) {
+  console.error(`ffmpeg is ${ffmpegArch}, expected ${arch}`);
+  process.exit(1);
+}
+const ffmpegOut = copyBinary(ffmpeg, "ffmpeg");
+const ffmpegLibDir = path.join(outDir, "ffmpeg-lib");
+const ffmpegSearchDirs = [...searchDirs];
+const ffmpegDir = path.dirname(ffmpeg);
+ffmpegSearchDirs.push(ffmpegDir);
+ffmpegSearchDirs.push(path.join(ffmpegDir, "..", "lib"));
+if (arch === "x64") {
+  ffmpegSearchDirs.push(...collectLibSearchDirs(stagingCellar));
+}
+bundleDylibs(
+  ffmpegOut,
+  ffmpegLibDir,
+  "@executable_path/ffmpeg-lib/",
+  ffmpegSearchDirs,
+  { overwriteDest: true }
+);
+
+const libs = [
+  ...fs.readdirSync(libDir).filter((f) => f.endsWith(".dylib")).map((f) => path.join(libDir, f)),
+  ...fs
+    .readdirSync(ffmpegLibDir)
+    .filter((f) => f.endsWith(".dylib"))
+    .map((f) => path.join(ffmpegLibDir, f)),
 ];
-for (const dir of searchDirs) {
-  bundlerArgs.push("-s", dir);
-}
-run(dylibbundler, bundlerArgs);
-
-try {
-  run("install_name_tool", ["-add_rpath", "@executable_path/lib", scrcpyOut]);
-} catch {
-  /* already present */
-}
-
-const libs = fs.readdirSync(libDir).filter((f) => f.endsWith(".dylib"));
 console.log(`bundled ${libs.length} dylib(s)`);
 
-console.log("Re-signing scrcpy + dylibs…");
+console.log("Re-signing binaries + dylibs…");
 run("codesign", ["--force", "--sign", "-", scrcpyOut]);
+run("codesign", ["--force", "--sign", "-", ffmpegOut]);
 for (const lib of libs) {
-  run("codesign", ["--force", "--sign", "-", path.join(libDir, lib)]);
+  run("codesign", ["--force", "--sign", "-", lib]);
 }
 
 const smokeCmd =
@@ -326,6 +388,22 @@ if (smoke.status !== 0) {
 }
 console.log((smoke.stdout || smoke.stderr).trim().split("\n")[0]);
 
+const ffmpegSmokeCmd =
+  arch === "x64" && process.arch !== "x64"
+    ? ["arch", ["-x86_64", ffmpegOut, "-version"]]
+    : [ffmpegOut, ["-version"]];
+const ffmpegSmoke = spawnSync(ffmpegSmokeCmd[0], ffmpegSmokeCmd[1], {
+  encoding: "utf8",
+});
+if (ffmpegSmoke.status !== 0) {
+  console.error("Bundled ffmpeg failed -version:");
+  console.error(
+    ffmpegSmoke.stderr || ffmpegSmoke.stdout || `exit ${ffmpegSmoke.status}`
+  );
+  process.exit(1);
+}
+console.log((ffmpegSmoke.stdout || ffmpegSmoke.stderr).trim().split("\n")[0]);
+
 // Convenience symlink/copy for packaging scripts that expect vendor/bin
 const alias = path.join(root, "vendor", "bin");
 fs.rmSync(alias, { recursive: true, force: true });
@@ -334,11 +412,12 @@ fs.cpSync(outDir, alias, { recursive: true });
 fs.writeFileSync(
   path.join(outDir, "README.txt"),
   [
-    "Bundled adb + portable scrcpy (+ dylibs) for Mirrox.",
+    "Bundled adb + portable scrcpy + ffmpeg (+ dylibs) for Mirrox.",
     "Generated by: npm run vendor",
     `Target arch: ${arch}`,
     `Host arch: ${process.arch}`,
     `scrcpy: ${scrcpyArchInfo}`,
+    `ffmpeg: ${ffmpegArchInfo}`,
     "",
   ].join("\n")
 );

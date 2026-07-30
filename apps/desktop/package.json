@@ -94,6 +94,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/frames",
+        "to": "frames",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {

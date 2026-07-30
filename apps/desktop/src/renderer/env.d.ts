@@ -30,6 +30,8 @@ interface DeviceDetails {
   ip?: string | null;
   storage?: { used?: string; total?: string; available?: string; raw?: string };
   connection: "Cable" | "Wireless";
+  displayWidth?: number;
+  displayHeight?: number;
   available: boolean;
   unavailableReason?: string;
 }
@@ -74,6 +76,12 @@ interface MirroxApi {
     raw: string;
   }>;
   getDeviceInfo: (serial: string) => Promise<DeviceDetails>;
+  getDeviceFramePreview: (serial: string) => Promise<{
+    ok: boolean;
+    dataUrl: string;
+    width: number;
+    height: number;
+  }>;
   sendNav: (
     serial: string,
     action: "back" | "home" | "recents" | "notifications"
@@ -102,10 +110,16 @@ interface MirroxApi {
     navBarEnabled: boolean;
     clipboardAutosyncDefault: boolean;
     screenshotCopyToClipboard: boolean;
+    mediaFrameApplyDefault: boolean;
+    mediaFrameId: string | null;
+    mediaFrameFitMode: "media-to-frame" | "frame-to-media";
+    mediaFramePath: string | null;
+    mediaFrameDataUrl: string | null;
     onboardingDismissed: boolean;
     updateBannerDismissedVersion: string | null;
     adbPath: string;
     scrcpyPath: string;
+    ffmpegPath?: string;
   }>;
   setSettings: (partial: {
     quality?: QualityPreset;
@@ -114,6 +128,8 @@ interface MirroxApi {
     navBarEnabled?: boolean;
     clipboardAutosyncDefault?: boolean;
     screenshotCopyToClipboard?: boolean;
+    mediaFrameApplyDefault?: boolean;
+    mediaFrameFitMode?: "media-to-frame" | "frame-to-media";
     onboardingDismissed?: boolean;
     updateBannerDismissedVersion?: string | null;
   }) => Promise<{
@@ -123,6 +139,11 @@ interface MirroxApi {
     navBarEnabled: boolean;
     clipboardAutosyncDefault: boolean;
     screenshotCopyToClipboard: boolean;
+    mediaFrameApplyDefault: boolean;
+    mediaFrameId: string | null;
+    mediaFrameFitMode: "media-to-frame" | "frame-to-media";
+    mediaFramePath: string | null;
+    mediaFrameDataUrl: string | null;
     onboardingDismissed: boolean;
     updateBannerDismissedVersion: string | null;
   }>;
@@ -142,17 +163,65 @@ interface MirroxApi {
   }>;
   saveScreenshot: (
     tempPath: string,
-    serial: string
+    serial: string,
+    applyFrame?: boolean
   ) => Promise<{ ok: boolean; canceled?: boolean; path?: string }>;
-  copyScreenshot: (tempPath: string) => Promise<{ ok: boolean }>;
+  copyScreenshot: (tempPath: string, applyFrame?: boolean) => Promise<{ ok: boolean }>;
   discardScreenshot: (tempPath: string) => Promise<{ ok: boolean }>;
+  getMediaFrame: () => Promise<{
+    id: string | null;
+    path: string | null;
+    dataUrl: string | null;
+    width: number | null;
+    height: number | null;
+    name: string | null;
+    applyDefault: boolean;
+    fitMode: "media-to-frame" | "frame-to-media";
+    builtins: Array<{
+      id: string;
+      name: string;
+      dataUrl: string;
+      width: number;
+      height: number;
+    }>;
+  }>;
+  pickMediaFrame: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    id?: string;
+    path?: string;
+    dataUrl?: string;
+    width?: number;
+    height?: number;
+    name?: string;
+    rect?: { x: number; y: number; w: number; h: number };
+  }>;
+  selectMediaFrame: (id: string) => Promise<{
+    ok: boolean;
+    id: string;
+    path: string;
+    dataUrl: string;
+    width: number;
+    height: number;
+    name: string;
+  }>;
+  clearMediaFrame: () => Promise<{ ok: boolean }>;
   startRecording: (serial: string) => Promise<{ ok: boolean; already?: boolean }>;
   stopRecording: (serial: string) => Promise<{
     ok: boolean;
     saved?: boolean;
     path?: string;
+    tempPath?: string;
+    serial?: string;
     canceled?: boolean;
+    discarded?: boolean;
   }>;
+  saveRecording: (
+    tempPath: string,
+    serial: string,
+    applyFrame?: boolean
+  ) => Promise<{ ok: boolean; saved?: boolean; path?: string; canceled?: boolean }>;
+  discardRecording: (tempPath: string) => Promise<{ ok: boolean }>;
   isRecording: (serial: string) => Promise<boolean>;
   dropFiles: (
     serial: string,

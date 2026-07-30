@@ -10,6 +10,10 @@ export interface AppSettings {
   navBarEnabled?: boolean;
   clipboardAutosyncDefault?: boolean;
   screenshotCopyToClipboard?: boolean;
+  mediaFrameApplyDefault?: boolean;
+  mediaFrameFitMode?: "media-to-frame" | "frame-to-media";
+  mediaFrameId?: string | null;
+  mediaFramePath?: string | null;
   updateBannerDismissedVersion?: string | null;
 }
 
@@ -20,6 +24,8 @@ const DEFAULTS: Required<
     | "navBarEnabled"
     | "clipboardAutosyncDefault"
     | "screenshotCopyToClipboard"
+    | "mediaFrameApplyDefault"
+    | "mediaFrameFitMode"
     | "updateBannerDismissedVersion"
   >
 > = {
@@ -27,6 +33,8 @@ const DEFAULTS: Required<
   navBarEnabled: false,
   clipboardAutosyncDefault: true,
   screenshotCopyToClipboard: false,
+  mediaFrameApplyDefault: false,
+  mediaFrameFitMode: "media-to-frame",
   updateBannerDismissedVersion: null,
 };
 
