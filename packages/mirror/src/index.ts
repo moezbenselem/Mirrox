@@ -8,6 +8,8 @@ export type QualityPreset = "low" | "medium" | "high";
 
 export type VideoSource = "display" | "camera";
 export type CameraFacing = "front" | "back";
+/** Clockwise rotation applied to the mirror window / recording. */
+export type OrientationDegrees = 0 | 90 | 180 | 270;
 
 export interface MirrorOptions {
   serial: string;
@@ -27,6 +29,8 @@ export interface MirrorOptions {
   videoSource?: VideoSource;
   cameraFacing?: CameraFacing;
   cameraId?: string;
+  /** Display + record orientation (0 / 90 / 180 / 270). */
+  orientation?: OrientationDegrees;
   /** Directory containing scrcpy.png (and optionally disconnected.png) */
   iconDir?: string;
   /** macOS .icns used for the transient dock .app wrapper */
@@ -143,6 +147,11 @@ export class MirrorSession extends EventEmitter {
       if (audio) {
         args.push("--audio-source=mic");
       }
+    }
+
+    const orientation = this.options.orientation ?? 0;
+    if (orientation !== 0) {
+      args.push(`--orientation=${orientation}`);
     }
 
     const env = { ...process.env };

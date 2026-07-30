@@ -4,6 +4,7 @@ export type DeviceState = "device" | "unauthorized" | "offline" | "unknown";
 export type QualityPreset = "low" | "medium" | "high";
 export type VideoSource = "display" | "camera";
 export type CameraFacing = "front" | "back";
+export type OrientationDegrees = 0 | 90 | 180 | 270;
 
 export interface DeviceInfo {
   serial: string;
@@ -17,6 +18,7 @@ export interface DeviceInfo {
   clipboardAutosync?: boolean;
   videoSource?: VideoSource;
   cameraFacing?: CameraFacing;
+  orientation?: OrientationDegrees;
   recording?: boolean;
   connection?: "Cable" | "Wireless";
 }
@@ -58,6 +60,8 @@ const api = {
     ipcRenderer.invoke("device:setCameraFacing", serial, facing),
   setCameraId: (serial: string, cameraId: string | null) =>
     ipcRenderer.invoke("device:setCameraId", serial, cameraId),
+  setOrientation: (serial: string, orientation: OrientationDegrees) =>
+    ipcRenderer.invoke("device:setOrientation", serial, orientation),
   listCameras: (serial: string) => ipcRenderer.invoke("device:listCameras", serial),
   getDeviceInfo: (serial: string): Promise<DeviceDetails> =>
     ipcRenderer.invoke("device:getInfo", serial),
@@ -145,9 +149,16 @@ const api = {
   pickUploadFolder: (): Promise<string[]> => ipcRenderer.invoke("fs:pickUploadFolder"),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke("app:pickFiles"),
   openPath: (target: string) => ipcRenderer.invoke("shell:openPath", target),
+  openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
+  getGithubStats: () => ipcRenderer.invoke("github:stats"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   installUpdate: () => ipcRenderer.invoke("updates:install"),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  onAboutOpen: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("about:open", listener);
+    return () => ipcRenderer.removeListener("about:open", listener);
+  },
   onDevicesUpdated: (cb: (devices: DeviceInfo[]) => void) => {
     const listener = (_: unknown, devices: DeviceInfo[]) => cb(devices);
     ipcRenderer.on("devices:updated", listener);

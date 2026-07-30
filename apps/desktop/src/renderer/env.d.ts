@@ -4,6 +4,7 @@ type DeviceState = "device" | "unauthorized" | "offline" | "unknown";
 type QualityPreset = "low" | "medium" | "high";
 type VideoSource = "display" | "camera";
 type CameraFacing = "front" | "back";
+type OrientationDegrees = 0 | 90 | 180 | 270;
 
 interface DeviceInfo {
   serial: string;
@@ -17,6 +18,7 @@ interface DeviceInfo {
   clipboardAutosync?: boolean;
   videoSource?: VideoSource;
   cameraFacing?: CameraFacing;
+  orientation?: OrientationDegrees;
   recording?: boolean;
   connection?: "Cable" | "Wireless";
 }
@@ -71,6 +73,10 @@ interface MirroxApi {
     serial: string,
     cameraId: string | null
   ) => Promise<{ ok: boolean; cameraId?: string | null }>;
+  setOrientation: (
+    serial: string,
+    orientation: OrientationDegrees
+  ) => Promise<{ ok: boolean; orientation?: OrientationDegrees }>;
   listCameras: (serial: string) => Promise<{
     cameras: Array<{ id: string; label: string }>;
     raw: string;
@@ -93,6 +99,7 @@ interface MirroxApi {
     clipboardAutosync: boolean;
     videoSource: VideoSource;
     cameraFacing: CameraFacing;
+    orientation: OrientationDegrees;
     mirroring: boolean;
     fullscreen: boolean;
   }>;
@@ -117,6 +124,7 @@ interface MirroxApi {
     mediaFrameDataUrl: string | null;
     onboardingDismissed: boolean;
     updateBannerDismissedVersion: string | null;
+    appVersion: string;
     adbPath: string;
     scrcpyPath: string;
     ffmpegPath?: string;
@@ -284,9 +292,19 @@ interface MirroxApi {
   pickUploadFolder: () => Promise<string[]>;
   pickFiles: () => Promise<string[]>;
   openPath: (target: string) => Promise<void>;
+  openExternal: (url: string) => Promise<{ ok: boolean; reason?: string }>;
+  getGithubStats: () => Promise<{
+    ok: boolean;
+    reason?: string;
+    stars: number;
+    forks: number;
+    url: string;
+    fullName: string;
+  }>;
   checkForUpdates: () => Promise<{ ok: boolean; reason?: string }>;
   installUpdate: () => Promise<{ ok: boolean; reason?: string }>;
   getPathForFile: (file: File) => string;
+  onAboutOpen: (cb: () => void) => () => void;
   onDevicesUpdated: (cb: (devices: DeviceInfo[]) => void) => () => void;
   onAdbError: (cb: (message: string) => void) => () => void;
   onMirrorError: (

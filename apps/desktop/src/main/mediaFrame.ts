@@ -63,7 +63,7 @@ export function detectGreenRect(framePath: string): GreenRect {
   const { width, height } = image.getSize();
   if (width < 1 || height < 1) throw new Error("Frame image is empty");
 
-  const bitmap = image.getBitmap();
+  const bitmap = image.toBitmap();
   let minX = width;
   let minY = height;
   let maxX = -1;

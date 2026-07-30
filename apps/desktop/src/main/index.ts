@@ -17,6 +17,7 @@ import {
   type QualityPreset,
   type VideoSource,
   type CameraFacing,
+  type OrientationDegrees,
 } from "@mirrox/mirror";
 import {
   MirrorShortcutManager,
@@ -124,6 +125,26 @@ function resolveScrcpyIconDir(): string | undefined {
   return undefined;
 }
 
+/** Prefer package.json so About / sidebar never show Electron's runtime version in dev. */
+function resolveMirroxVersion(): string {
+  const candidates = [
+    path.join(app.getAppPath(), "package.json"),
+    path.join(__dirname, "../../package.json"),
+    path.join(process.cwd(), "apps/desktop/package.json"),
+    path.join(process.cwd(), "package.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const version = JSON.parse(fs.readFileSync(candidate, "utf8")).version;
+      if (typeof version === "string" && version.length > 0) return version;
+    } catch {
+      /* ignore */
+    }
+  }
+  return app.getVersion();
+}
+
 let mainWindow: BrowserWindow | null = null;
 let adb: AdbClient;
 let mirrors: MirrorManager;
@@ -141,12 +162,22 @@ let mediaFrameFitMode: "media-to-frame" | "frame-to-media" = "media-to-frame";
 let onboardingDismissed = false;
 let updateBannerDismissedVersion: string | null = null;
 
+const GITHUB_OWNER = "moezbenselem";
+const GITHUB_REPO = "Mirrox";
+const GITHUB_REPO_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}`;
+
+let githubStatsCache: {
+  fetchedAt: number;
+  data: { stars: number; forks: number; url: string; fullName: string };
+} | null = null;
+
 const audioBySerial = new Map<string, boolean>();
 const clipboardBySerial = new Map<string, boolean>();
 const clipboardToastShown = new Set<string>();
 const videoSourceBySerial = new Map<string, VideoSource>();
 const cameraFacingBySerial = new Map<string, CameraFacing>();
 const cameraIdBySerial = new Map<string, string>();
+const orientationBySerial = new Map<string, OrientationDegrees>();
 const fullscreenBySerial = new Map<string, boolean>();
 const restartingSerials = new Set<string>();
 const recordings = new Map<
@@ -326,6 +357,7 @@ async function refreshDevices(): Promise<AdbDevice[]> {
     clipboardAutosync: clipboardBySerial.get(d.serial) ?? clipboardAutosyncDefault,
     videoSource: videoSourceBySerial.get(d.serial) ?? "display",
     cameraFacing: cameraFacingBySerial.get(d.serial) ?? "back",
+    orientation: orientationBySerial.get(d.serial) ?? 0,
     recording: recordings.has(d.serial),
     connection: connectionMethodLabel(d.serial),
   }));
@@ -373,6 +405,7 @@ async function startMirror(serial: string, fullscreen = false): Promise<void> {
   const videoSource = videoSourceBySerial.get(serial) ?? "display";
   const cameraFacing = cameraFacingBySerial.get(serial) ?? "back";
   const cameraId = cameraIdBySerial.get(serial);
+  const orientation = orientationBySerial.get(serial) ?? 0;
   const scrcpyPath = resolveVendorBin("scrcpy");
   fullscreenBySerial.set(serial, fullscreen);
   if (keepScreenOn) {
@@ -388,6 +421,7 @@ async function startMirror(serial: string, fullscreen = false): Promise<void> {
     videoSource,
     cameraFacing: videoSource === "camera" ? cameraFacing : undefined,
     cameraId: videoSource === "camera" ? cameraId : undefined,
+    orientation: videoSource === "camera" ? orientation : undefined,
     fullscreen,
     adbPath: adb.adbPath,
     scrcpyPath,
@@ -421,6 +455,8 @@ async function mirrorRestartPatch(serial: string) {
         ? (cameraFacingBySerial.get(serial) ?? "back")
         : undefined,
     cameraId: videoSource === "camera" ? cameraIdBySerial.get(serial) : undefined,
+    orientation:
+      videoSource === "camera" ? (orientationBySerial.get(serial) ?? 0) : undefined,
     fullscreen: fullscreenBySerial.get(serial) ?? false,
     adbPath: adb.adbPath,
     scrcpyPath,
@@ -623,6 +659,7 @@ function registerIpc(): void {
     clipboardAutosync: clipboardBySerial.get(serial) ?? clipboardAutosyncDefault,
     videoSource: videoSourceBySerial.get(serial) ?? "display",
     cameraFacing: cameraFacingBySerial.get(serial) ?? "back",
+    orientation: orientationBySerial.get(serial) ?? 0,
     mirroring: mirrors.isRunning(serial),
     fullscreen: fullscreenBySerial.get(serial) ?? false,
   }));
@@ -676,6 +713,23 @@ function registerIpc(): void {
     await refreshDevices();
     return { ok: true, cameraId };
   });
+
+  ipcMain.handle(
+    "device:setOrientation",
+    async (_e, serial: string, orientation: OrientationDegrees) => {
+      const allowed: OrientationDegrees[] = [0, 90, 180, 270];
+      if (!allowed.includes(orientation)) {
+        throw new Error("Orientation must be 0, 90, 180, or 270");
+      }
+      orientationBySerial.set(serial, orientation);
+      if (mirrors.isRunning(serial) && (videoSourceBySerial.get(serial) ?? "display") === "camera") {
+        markRestarting(serial);
+        await mirrors.restart(serial, await mirrorRestartPatch(serial));
+      }
+      await refreshDevices();
+      return { ok: true, orientation };
+    }
+  );
 
   ipcMain.handle("device:listCameras", async (_e, serial: string) => {
     const scrcpyPath = resolveVendorBin("scrcpy");
@@ -816,6 +870,7 @@ function registerIpc(): void {
       mediaFrameDataUrl: frame?.dataUrl ?? null,
       onboardingDismissed,
       updateBannerDismissedVersion,
+      appVersion: resolveMirroxVersion(),
       adbPath: adb.adbPath,
       scrcpyPath,
       scrcpyServerPath: resolveScrcpyServer(scrcpyPath) ?? null,
@@ -1455,6 +1510,65 @@ function registerIpc(): void {
     await shell.openPath(target);
   });
 
+  ipcMain.handle("shell:openExternal", async (_e, url: string) => {
+    if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+      return { ok: false, reason: "Invalid URL" };
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  });
+
+  ipcMain.handle("github:stats", async () => {
+    const now = Date.now();
+    if (githubStatsCache && now - githubStatsCache.fetchedAt < 10 * 60 * 1000) {
+      return { ok: true, ...githubStatsCache.data };
+    }
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`,
+        {
+          headers: {
+            Accept: "application/vnd.github+json",
+            "User-Agent": "Mirrox",
+          },
+        }
+      );
+      if (!res.ok) {
+        return {
+          ok: false,
+          reason: `GitHub ${res.status}`,
+          url: GITHUB_REPO_URL,
+          fullName: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+          stars: githubStatsCache?.data.stars ?? 0,
+          forks: githubStatsCache?.data.forks ?? 0,
+        };
+      }
+      const json = (await res.json()) as {
+        stargazers_count?: number;
+        forks_count?: number;
+        html_url?: string;
+        full_name?: string;
+      };
+      const data = {
+        stars: json.stargazers_count ?? 0,
+        forks: json.forks_count ?? 0,
+        url: json.html_url ?? GITHUB_REPO_URL,
+        fullName: json.full_name ?? `${GITHUB_OWNER}/${GITHUB_REPO}`,
+      };
+      githubStatsCache = { fetchedAt: now, data };
+      return { ok: true, ...data };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: String(err),
+        url: GITHUB_REPO_URL,
+        fullName: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+        stars: githubStatsCache?.data.stars ?? 0,
+        forks: githubStatsCache?.data.forks ?? 0,
+      };
+    }
+  });
+
   ipcMain.handle("app:pickFiles", async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog({
       properties: ["openFile", "multiSelections"],
@@ -1490,6 +1604,14 @@ function registerIpc(): void {
 app.setName("Mirrox");
 
 app.whenReady().then(() => {
+  const mirroxVersion = resolveMirroxVersion();
+  app.setAboutPanelOptions({
+    applicationName: "Mirrox",
+    applicationVersion: mirroxVersion,
+    version: mirroxVersion,
+    copyright: "Copyright © Mirrox",
+  });
+
   const persisted = loadSettings();
   if (persisted.quality) quality = persisted.quality;
   if (typeof persisted.alwaysOnTop === "boolean") alwaysOnTop = persisted.alwaysOnTop;
@@ -1542,7 +1664,10 @@ app.whenReady().then(() => {
       {
         label: app.name,
         submenu: [
-          { role: "about" },
+          {
+            label: `About ${app.name}`,
+            click: () => send("about:open", null),
+          },
           { type: "separator" },
           {
             label: "Check for Updates…",
@@ -1573,7 +1698,7 @@ app.whenReady().then(() => {
         label: "View",
         submenu: [
           { role: "reload" },
-          { role: "toggleDevTools" },
+          ...(!app.isPackaged ? [{ role: "toggleDevTools" as const }] : []),
           { type: "separator" },
           { role: "togglefullscreen" },
         ],

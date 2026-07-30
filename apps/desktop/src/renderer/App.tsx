@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AboutModal from "./AboutModal";
 import FileTransfer from "./FileTransfer";
 import DeviceInfoCard from "./DeviceInfoCard";
 import NavBar from "./NavBar";
@@ -7,10 +8,14 @@ import WirelessPairModal from "./WirelessPairModal";
 import UpdateBanner from "./UpdateBanner";
 import logoUrl from "./assets/logo.png";
 
+const GITHUB_REPO_URL = "https://github.com/moezbenselem/Mirrox";
+const GITHUB_RELEASES_URL = "https://github.com/moezbenselem/Mirrox/releases";
+
 type DeviceState = "device" | "unauthorized" | "offline" | "unknown";
 type QualityPreset = "low" | "medium" | "high";
 type VideoSource = "display" | "camera";
 type CameraFacing = "front" | "back";
+type OrientationDegrees = 0 | 90 | 180 | 270;
 
 interface DeviceInfo {
   serial: string;
@@ -24,6 +29,7 @@ interface DeviceInfo {
   clipboardAutosync?: boolean;
   videoSource?: VideoSource;
   cameraFacing?: CameraFacing;
+  orientation?: OrientationDegrees;
   recording?: boolean;
   connection?: "Cable" | "Wireless";
 }
@@ -222,6 +228,15 @@ export default function App() {
   const [pairOpen, setPairOpen] = useState(false);
   const [cameras, setCameras] = useState<Array<{ id: string; label: string }>>([]);
   const [cameraEmptyHint, setCameraEmptyHint] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [githubStats, setGithubStats] = useState<{
+    stars: number;
+    forks: number;
+    url: string;
+    fullName: string;
+  } | null>(null);
+  const [githubStatsLoading, setGithubStatsLoading] = useState(false);
   const [update, setUpdate] = useState<{
     version: string;
     progress: number | null;
@@ -265,6 +280,7 @@ export default function App() {
       setFrameDataUrl(s.mediaFrameDataUrl ?? null);
       setFrameId(s.mediaFrameId ?? null);
       setShowOnboarding(!s.onboardingDismissed);
+      setAppVersion(s.appVersion);
     });
     void window.mirrox.getMediaFrame().then((f) => {
       setFrameDataUrl(f.dataUrl);
@@ -305,6 +321,7 @@ export default function App() {
     const offUpdateErr = window.mirrox.onUpdateError((message) =>
       showToast("error", `Update failed — ${message}. Download DMG from GitHub if needed.`)
     );
+    const offAbout = window.mirrox.onAboutOpen(() => setAboutOpen(true));
     const offMirrorShortcut = window.mirrox.onMirrorShortcut(
       ({ action, serial, error, payload }) => {
         if (error) {
@@ -351,9 +368,29 @@ export default function App() {
       offUpdateProg();
       offUpdateReady();
       offUpdateErr();
+      offAbout();
       offMirrorShortcut();
     };
   }, [selected, showToast]);
+
+  useEffect(() => {
+    if (!aboutOpen) return;
+    let cancelled = false;
+    setGithubStatsLoading(true);
+    void window.mirrox.getGithubStats().then((res) => {
+      if (cancelled) return;
+      setGithubStats({
+        stars: res.stars,
+        forks: res.forks,
+        url: res.url || GITHUB_REPO_URL,
+        fullName: res.fullName || "moezbenselem/Mirrox",
+      });
+      setGithubStatsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [aboutOpen]);
 
   useEffect(() => {
     if (!selectedDevice?.mirroring) return;
@@ -374,6 +411,7 @@ export default function App() {
   const clipboardOn = selectedDevice?.clipboardAutosync !== false;
   const videoSource = selectedDevice?.videoSource ?? "display";
   const cameraFacing = selectedDevice?.cameraFacing ?? "back";
+  const orientation = (selectedDevice?.orientation ?? 0) as OrientationDegrees;
   const hasReadyDevice = devices.some((d) => d.state === "device");
   const isWireless = selectedDevice?.connection === "Wireless" || /:\d+$/.test(selectedDevice?.serial ?? "");
 
@@ -655,6 +693,24 @@ export default function App() {
     }
   }
 
+  async function setOrientation(next: OrientationDegrees) {
+    if (!selectedDevice || !canControl) return;
+    setBusy(true);
+    try {
+      await window.mirrox.setOrientation(selectedDevice.serial, next);
+      showToast("ok", `Rotated to ${next}°`);
+    } catch (err) {
+      showToast("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function stepOrientation(delta: 90 | -90) {
+    const next = ((((orientation + delta) % 360) + 360) % 360) as OrientationDegrees;
+    void setOrientation(next);
+  }
+
   async function refreshCameras() {
     if (!selectedDevice || !canControl) return;
     setBusy(true);
@@ -867,6 +923,25 @@ export default function App() {
               })
             )}
           </div>
+          {appVersion && (
+            <div className="sidebar-version">
+              <span>v{appVersion}</span>
+              <button
+                type="button"
+                className="sidebar-releases"
+                title="GitHub Releases"
+                aria-label="Open GitHub Releases"
+                onClick={() => void window.mirrox.openExternal(GITHUB_RELEASES_URL)}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 4.58c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                  />
+                </svg>
+              </button>
+            </div>
+          )}
         </aside>
 
         <main className="main">
@@ -975,6 +1050,37 @@ export default function App() {
                       <button className="btn" disabled={busy} onClick={() => void refreshCameras()}>
                         List cameras
                       </button>
+                    </div>
+                    <div className="row">
+                      <span className="label">Rotate</span>
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        title="Rotate counter-clockwise 90°"
+                        onClick={() => stepOrientation(-90)}
+                      >
+                        ⟲ 90°
+                      </button>
+                      <span className="label" aria-live="polite">
+                        {orientation}°
+                      </span>
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        title="Rotate clockwise 90°"
+                        onClick={() => stepOrientation(90)}
+                      >
+                        ⟳ 90°
+                      </button>
+                      {orientation !== 0 && (
+                        <button
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => void setOrientation(0)}
+                        >
+                          Reset
+                        </button>
+                      )}
                     </div>
                     {cameraEmptyHint && (
                       <p className="mirror-shortcuts-hint" style={{ margin: 0 }}>
@@ -1153,6 +1259,18 @@ export default function App() {
         onClose={() => setPairOpen(false)}
         onToast={showToast}
       />
+
+      {aboutOpen && (
+        <AboutModal
+          version={appVersion ?? "…"}
+          stats={githubStats}
+          loading={githubStatsLoading}
+          onClose={() => setAboutOpen(false)}
+          onOpenRepo={() =>
+            void window.mirrox.openExternal(githubStats?.url ?? GITHUB_REPO_URL)
+          }
+        />
+      )}
 
       {preview && (
         <div className="modal-backdrop" onClick={() => void closePreview()}>

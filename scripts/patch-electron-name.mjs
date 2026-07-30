@@ -15,7 +15,23 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_NAME = "Mirrox";
 const APP_ID = "com.mirrox.app";
 
-function patchPlist(plistPath) {
+function readAppVersion() {
+  const candidates = [
+    path.join(__dirname, "../apps/desktop/package.json"),
+    path.join(__dirname, "../package.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const version = JSON.parse(fs.readFileSync(candidate, "utf8")).version;
+      if (typeof version === "string" && version.length > 0) return version;
+    } catch {
+      /* ignore */
+    }
+  }
+  return "0.0.0";
+}
+
+function patchPlist(plistPath, appVersion) {
   if (!fs.existsSync(plistPath)) return false;
   let xml = fs.readFileSync(plistPath, "utf8");
   const before = xml;
@@ -31,6 +47,14 @@ function patchPlist(plistPath) {
   xml = xml.replace(
     /(<key>CFBundleIdentifier<\/key>\s*<string>)[^<]*(<\/string>)/,
     `$1${APP_ID}$2`
+  );
+  xml = xml.replace(
+    /(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/,
+    `$1${appVersion}$2`
+  );
+  xml = xml.replace(
+    /(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/,
+    `$1${appVersion}$2`
   );
 
   if (xml === before) return false;
@@ -98,14 +122,15 @@ function main() {
 
   const plistPath = path.join(appPath, "Contents", "Info.plist");
   const resourcesDir = path.join(appPath, "Contents", "Resources");
+  const appVersion = readAppVersion();
 
-  const renamedPlist = patchPlist(plistPath);
+  const renamedPlist = patchPlist(plistPath, appVersion);
   const iconed = copyDockIcon(resourcesDir);
   const pathTxt = updatePathTxt(electronRoot);
   touchBundle(appPath);
 
   console.log(
-    `[mirrox] Dock app bundle → ${path.basename(appPath)} (path.txt=${pathTxt}${
+    `[mirrox] Dock app bundle → ${path.basename(appPath)} v${appVersion} (path.txt=${pathTxt}${
       renamedPlist ? ", plist" : ""
     }${iconed ? ", icon" : ""})`
   );
